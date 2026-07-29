@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
 from gpt_stock_monitor.config import AppConfig
@@ -45,6 +45,7 @@ _SITE_ERRORS = (
     CategoryNotFoundError,
     SuspiciousExtractionError,
 )
+_MAX_MESSAGE_BYTES = 18_000
 
 
 class Notifier(Protocol):
@@ -203,7 +204,7 @@ def _apply_observations(
 
 def _event_document(applied: _Applied, checked_at: datetime) -> dict[str, object]:
     return {
-        "checked_at": checked_at.isoformat(),
+        "checked_at": checked_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "changes": [change.model_dump(mode="json") for change in applied.changes],
         "health_events": [
             {
@@ -225,14 +226,74 @@ def _event_id(parent: str | None, event_document: Mapping[str, object]) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def _health_part(event_id: str, events: Sequence[HealthEvent]) -> dict[str, object]:
-    lines = [f"Monitor health\nEvent: {event_id}"]
-    for event in events:
-        line = f"- {event.kind.value} | {event.key} | count={event.count}"
-        if event.reason is not None:
-            line = f"{line} | {event.reason}"
-        lines.append(line)
-    return {"msg_type": "text", "content": {"text": "\n".join(lines)}}
+def _payload_size(payload: Mapping[str, object]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _health_payload(
+    event_id: str,
+    items: Sequence[str],
+    part_number: int,
+    total_parts: int,
+) -> dict[str, object]:
+    header = f"Monitor health\nEvent: {event_id}\nPart: {part_number}/{total_parts}"
+    return {"msg_type": "text", "content": {"text": f"{header}\n\n" + "\n".join(items)}}
+
+
+def _health_item(event: HealthEvent) -> str:
+    item = f"- {event.kind.value} | {event.key} | count={event.count}"
+    if event.reason is not None:
+        item = f"{item} | {event.reason}"
+    return item
+
+
+def _partition_health_items(
+    event_id: str,
+    items: Sequence[str],
+    total_parts: int,
+) -> list[tuple[str, ...]]:
+    groups: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for item in items:
+        candidate = (*current, item)
+        part_number = len(groups) + 1
+        if (
+            _payload_size(_health_payload(event_id, candidate, part_number, total_parts))
+            <= _MAX_MESSAGE_BYTES
+        ):
+            current.append(item)
+            continue
+        if not current:
+            raise MessageTooLargeError("health event exceeds maximum message size")
+        groups.append(tuple(current))
+        current = [item]
+        part_number = len(groups) + 1
+        if (
+            _payload_size(_health_payload(event_id, current, part_number, total_parts))
+            > _MAX_MESSAGE_BYTES
+        ):
+            raise MessageTooLargeError("health event exceeds maximum message size")
+    if current:
+        groups.append(tuple(current))
+    return groups
+
+
+def _health_parts(event_id: str, events: Sequence[HealthEvent]) -> tuple[dict[str, object], ...]:
+    items = tuple(_health_item(event) for event in events)
+    total_parts = 1
+    while True:
+        groups = _partition_health_items(event_id, items, total_parts)
+        if len(groups) == total_parts:
+            return tuple(
+                _health_payload(event_id, group, index, total_parts)
+                for index, group in enumerate(groups, start=1)
+            )
+        total_parts = len(groups)
+
+
+def _validate_message_parts(parts: Sequence[Mapping[str, object]]) -> None:
+    if any(_payload_size(part) > _MAX_MESSAGE_BYTES for part in parts):
+        raise MessageTooLargeError("notification exceeds maximum message size")
 
 
 def _with_pending(
@@ -243,10 +304,11 @@ def _with_pending(
 ) -> tuple[StateDocument, PendingEvent]:
     event_id = _event_id(parent, _event_document(applied, checked_at))
     parts: list[dict[str, object]] = list(
-        build_message_parts(event_id, applied.changes, checked_at)
+        build_message_parts(event_id, applied.changes, checked_at, max_bytes=_MAX_MESSAGE_BYTES)
     )
     if applied.health_events:
-        parts.append(_health_part(event_id, applied.health_events))
+        parts.extend(_health_parts(event_id, applied.health_events))
+    _validate_message_parts(parts)
     serialized = tuple(
         json.dumps(part, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         for part in parts
@@ -367,7 +429,7 @@ async def run_once(
         try:
             staged, staged_event = _with_pending(staged, current.version, applied, checked_at)
         except MessageTooLargeError:
-            return RunResult(3, _summary(applied, current.document))
+            return RunResult(3, _output(current.document))
 
     if staged != current.document:
         for _ in range(3):
@@ -395,7 +457,7 @@ async def run_once(
                         staged, current.version, applied, checked_at
                     )
                 except MessageTooLargeError:
-                    return RunResult(3, _summary(applied, current.document))
+                    return RunResult(3, _output(current.document))
             if staged == current.document:
                 break
         else:

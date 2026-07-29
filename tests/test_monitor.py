@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import inspect
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -397,6 +397,97 @@ def test_oversized_notification_is_a_safe_exit_three() -> None:
     assert repository.publishes == []
 
 
+def test_health_events_are_split_on_item_boundaries_below_message_limit() -> None:
+    categories = tuple(f"category-{index:03d}-{'x' * 100}" for index in range(220))
+    repository = MemoryRepository(StateDocument())
+    notifier = Notifier()
+
+    result = asyncio.run(
+        run_once(
+            app_config(*categories),
+            repository,
+            Adapter(),
+            notifier,
+            dry_run=False,
+            checked_at=CHECKED_AT,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert len(notifier.calls) == 1
+    sent_parts = notifier.calls[0]
+    assert len(sent_parts) > 1
+    pending_event = repository.publishes[0][1].pending_events[0]
+    assert pending_event.message_parts == tuple(
+        json.dumps(part, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for part in sent_parts
+    )
+    total = len(sent_parts)
+    for index, part in enumerate(sent_parts, start=1):
+        encoded = json.dumps(part, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        assert len(encoded) <= 18_000
+        text = part["content"]["text"]
+        assert f"Event: {pending_event.event_id}" in text
+        assert f"Part: {index}/{total}" in text
+
+
+def test_single_oversized_health_item_fails_before_publish_without_echoing_content() -> None:
+    category = "oversized-" + "x" * 19_000
+    repository = MemoryRepository(StateDocument())
+    notifier = Notifier()
+
+    result = asyncio.run(
+        run_once(
+            app_config(category),
+            repository,
+            Adapter(),
+            notifier,
+            dry_run=False,
+            checked_at=CHECKED_AT,
+        )
+    )
+
+    assert result.exit_code == 3
+    assert repository.publishes == []
+    assert notifier.calls == []
+    assert category not in json.dumps(result.output)
+
+
+def test_mixed_change_and_health_parts_all_respect_message_limit() -> None:
+    key = state_key("shop-a", "General")
+    health_categories = tuple(f"missing-{index:03d}-{'y' * 100}" for index in range(220))
+    repository = MemoryRepository(StateDocument(snapshots={key: snapshot()}))
+    notifier = Notifier()
+    adapter = Adapter(
+        {"General": CategoryObservation(products=(product(price="12"),), explicit_count=None)}
+    )
+
+    result = asyncio.run(
+        run_once(
+            app_config("General", *health_categories),
+            repository,
+            adapter,
+            notifier,
+            dry_run=False,
+            checked_at=CHECKED_AT,
+        )
+    )
+
+    assert result.exit_code == 0
+    sent_parts = notifier.calls[0]
+    assert "Monitor health" not in sent_parts[0]["content"]["text"]
+    assert all(
+        len(json.dumps(part, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 18_000
+        for part in sent_parts
+    )
+    first_health = next(
+        index
+        for index, part in enumerate(sent_parts)
+        if "Monitor health" in part["content"]["text"]
+    )
+    assert all("Monitor health" in part["content"]["text"] for part in sent_parts[first_health:])
+
+
 def test_new_event_id_hashes_parent_plus_canonical_event_json() -> None:
     key = state_key("shop-a", "General")
     repository = MemoryRepository(StateDocument(snapshots={key: snapshot()}))
@@ -417,7 +508,7 @@ def test_new_event_id_hashes_parent_plus_canonical_event_json() -> None:
 
     assert result.exit_code == 3
     event_document = {
-        "checked_at": CHECKED_AT.isoformat(),
+        "checked_at": CHECKED_AT.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "changes": result.output["changes"],
         "health_events": [],
     }
@@ -426,6 +517,43 @@ def test_new_event_id_hashes_parent_plus_canonical_event_json() -> None:
     )
     expected = hashlib.sha256(f"v1{canonical}".encode()).hexdigest()
     assert repository.current.document.pending_events[0].event_id == expected
+
+
+def test_event_id_uses_canonical_utc_instant_not_input_timezone() -> None:
+    key = state_key("shop-a", "General")
+    initial = StateDocument(snapshots={key: snapshot()})
+    observation = {
+        "General": CategoryObservation(products=(product(price="12"),), explicit_count=None)
+    }
+    utc_repository = MemoryRepository(initial)
+    shanghai_repository = MemoryRepository(initial)
+
+    utc_result = asyncio.run(
+        run_once(
+            app_config(),
+            utc_repository,
+            Adapter(observation),
+            Notifier(fail_on=1),
+            dry_run=False,
+            checked_at=CHECKED_AT,
+        )
+    )
+    shanghai_result = asyncio.run(
+        run_once(
+            app_config(),
+            shanghai_repository,
+            Adapter(observation),
+            Notifier(fail_on=1),
+            dry_run=False,
+            checked_at=CHECKED_AT.astimezone(timezone(timedelta(hours=8))),
+        )
+    )
+
+    assert utc_result.exit_code == shanghai_result.exit_code == 3
+    assert (
+        utc_repository.current.document.pending_events[0].event_id
+        == shanghai_repository.current.document.pending_events[0].event_id
+    )
 
 
 def test_confirmation_reload_does_not_send_a_later_event_already_delivered_remotely() -> None:
