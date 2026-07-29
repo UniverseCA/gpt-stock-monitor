@@ -25,6 +25,7 @@ from gpt_stock_monitor.sites.base import CategoryObservation
 from gpt_stock_monitor.state import (
     PublishResult,
     PublishStatus,
+    StateError,
     StateRepositoryError,
     VersionedState,
 )
@@ -624,6 +625,36 @@ def test_repository_boundary_error_is_a_safe_exit_three() -> None:
 
     assert result.exit_code == 3
     assert result.output == {"error": "state load failed"}
+
+
+def test_invalid_repository_state_is_a_safe_exit_three_without_side_effects() -> None:
+    class InvalidStateRepository(MemoryRepository):
+        def load(self) -> VersionedState:
+            self.loads += 1
+            raise StateError("secret invalid state contents")
+
+    repository = InvalidStateRepository(StateDocument())
+    adapter = Adapter()
+    notifier = Notifier()
+
+    result = asyncio.run(
+        run_once(
+            app_config(),
+            repository,
+            adapter,
+            notifier,
+            dry_run=False,
+            checked_at=CHECKED_AT,
+        )
+    )
+
+    assert result.exit_code == 3
+    assert result.output == {"error": "state load failed"}
+    assert "secret" not in json.dumps(result.output)
+    assert repository.loads == 1
+    assert repository.publishes == []
+    assert adapter.calls == []
+    assert notifier.calls == []
 
 
 def test_monitor_does_not_import_concrete_state_git_backend() -> None:
