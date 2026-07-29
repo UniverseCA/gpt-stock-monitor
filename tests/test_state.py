@@ -295,4 +295,5 @@ def test_repository_value_types_have_fixed_protocol_contract() -> None:
 
 def test_git_repository_error_uses_the_public_repository_error_boundary() -> None:
     assert issubclass(StateRepositoryError, RuntimeError)
+    assert issubclass(StateError, StateRepositoryError)
     assert issubclass(StateGitError, StateRepositoryError)

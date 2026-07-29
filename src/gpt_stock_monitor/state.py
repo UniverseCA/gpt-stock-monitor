@@ -29,7 +29,11 @@ __all__ = [
 ]
 
 
-class StateError(ValueError):
+class StateRepositoryError(RuntimeError):
+    pass
+
+
+class StateError(StateRepositoryError):
     """A state file could not be decoded or validated."""
 
 
@@ -129,10 +133,6 @@ class PublishResult:
 
     status: PublishStatus
     remote_version: str | None
-
-
-class StateRepositoryError(RuntimeError):
-    pass
 
 
 class StateRepository(Protocol):
