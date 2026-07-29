@@ -25,7 +25,7 @@ from gpt_stock_monitor.state import (
 
 SHOP_URL = "https://pay.ldxp.cn/shop/NIFGEAC5"
 CATEGORY = "GPT 商品"
-WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/test-only"
+WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/test-only-token-1234"
 PADDING = "x" * 3_200
 ALPHA = f"Alpha {PADDING} A"
 BETA = f"Beta {PADDING} B"
@@ -244,11 +244,11 @@ def test_real_cli_pipeline_and_dry_run_preserve_pending_state(
         assert expected in combined_notification
 
     assert WEBHOOK not in second_stdout
-    assert "test-only" not in second_stdout
+    assert "test-only-token-1234" not in second_stdout
     for request in requests:
         serialized_request = json.dumps(request, ensure_ascii=False)
         assert WEBHOOK not in serialized_request
-        assert "test-only" not in serialized_request
+        assert "test-only-token-1234" not in serialized_request
 
     state = load_state(state_path)
     payload = state.model_dump(mode="json")

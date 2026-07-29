@@ -38,6 +38,9 @@ _DEFAULT_CONFIG = Path("config/monitors.yaml")
 _FEISHU_WEBHOOK = re.compile(
     r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[^\s\"'<>]+"
 )
+_FEISHU_WEBHOOK_PATH = re.compile(
+    r"^/open-apis/bot/v2/hook/(?P<token>[A-Za-z0-9_-]{16,128})$"
+)
 _RUN_ERRORS = (
     StateRepositoryError,
     FeishuError,
@@ -101,22 +104,32 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _redact(text: str, webhook_url: str | None) -> str:
+def _validate_webhook_url(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if (
+        value != value.strip()
+        or parsed.scheme != "https"
+        or parsed.hostname != "open.feishu.cn"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    match = _FEISHU_WEBHOOK_PATH.fullmatch(parsed.path)
+    return match.group("token") if match is not None else None
+
+
+def _redact(text: str, webhook_url: str | None, webhook_token: str | None) -> str:
     if webhook_url:
         text = text.replace(webhook_url, "[REDACTED]")
-        try:
-            path_segments = [
-                segment for segment in urlsplit(webhook_url).path.split("/") if segment
-            ]
-        except ValueError:
-            path_segments = []
-        token = (
-            path_segments[-1]
-            if len(path_segments) >= 2 and path_segments[-2] == "hook"
-            else ""
-        )
-        if token:
-            text = text.replace(token, "[REDACTED]")
+    if webhook_token:
+        text = text.replace(webhook_token, "[REDACTED]")
     return _FEISHU_WEBHOOK.sub("[REDACTED]", text)
 
 
@@ -154,9 +167,15 @@ def main(
     """Run one cycle and return its process exit code."""
     arguments = _parser().parse_args(argv)
     webhook_url = None if arguments.dry_run else os.environ.get("FEISHU_WEBHOOK_URL")
+    webhook_token = None
     if not arguments.dry_run and not webhook_url:
         sys.stderr.write("configuration error: FEISHU_WEBHOOK_URL is required\n")
         return 2
+    if webhook_url is not None:
+        webhook_token = _validate_webhook_url(webhook_url)
+        if webhook_token is None:
+            sys.stderr.write("configuration error: invalid FEISHU_WEBHOOK_URL\n")
+            return 2
 
     try:
         try:
@@ -182,12 +201,12 @@ def main(
             sort_keys=True,
             separators=(",", ":"),
         )
-        _write_stdout_utf8(f"{_redact(serialized, webhook_url)}\n")
+        _write_stdout_utf8(f"{_redact(serialized, webhook_url, webhook_token)}\n")
     except _RUN_ERRORS:
         sys.stderr.write("monitor run failed\n")
         return 3
     except Exception:
-        diagnostic = _redact(traceback.format_exc(), webhook_url)
+        diagnostic = _redact(traceback.format_exc(), webhook_url, webhook_token)
         sys.stderr.write(diagnostic)
         return 3
 
