@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 import pytest
@@ -145,3 +146,35 @@ def test_validation_error_does_not_echo_unknown_webhook_secret(tmp_path: Path) -
         load_config(write_config(tmp_path, content))
 
     assert secret not in str(exc_info.value)
+
+
+def test_parser_error_does_not_leak_credentials_through_exception_chain() -> None:
+    secret = "sentinel-parser-secret"
+    value = f"https://user:{secret}\uff20pay.ldxp.cn/shop/NIFGEAC5"
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_shop_url(value)
+
+    formatted = "".join(
+        traceback.format_exception(
+            type(exc_info.value), exc_info.value, exc_info.value.__traceback__
+        )
+    )
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert secret not in formatted
+
+
+@pytest.mark.parametrize("control", ["\t", "\r", "\n"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "https://pay.ldxp.cn{control}/shop/NIFGEAC5",
+        "https://pay.ldxp.cn/{control}shop/NIFGEAC5",
+        "https://pay.ldxp.cn/shop/NIF{control}GEAC5",
+    ],
+    ids=["host", "path-prefix", "shop-id"],
+)
+def test_rejects_raw_url_control_characters(control: str, template: str) -> None:
+    with pytest.raises(ValueError):
+        validate_shop_url(template.format(control=control))

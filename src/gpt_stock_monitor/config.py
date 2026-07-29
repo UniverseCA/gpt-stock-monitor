@@ -25,11 +25,17 @@ URL_ADAPTER = TypeAdapter(AnyHttpUrl)
 
 
 def _shop_id_from_url(value: str) -> str:
+    if any(control in value for control in "\t\r\n"):
+        raise ValueError("shop URL must not contain control characters")
+
+    parse_failed = False
     try:
         parsed = urlsplit(value)
         port = parsed.port
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid shop URL") from exc
+    except (TypeError, ValueError):
+        parse_failed = True
+    if parse_failed:
+        raise ValueError("invalid shop URL")
 
     if value != value.strip():
         raise ValueError("shop URL must not contain surrounding whitespace")
