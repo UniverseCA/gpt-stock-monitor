@@ -305,3 +305,61 @@ def test_load_config_exposes_only_safe_error_details(
 def test_rejects_empty_monitor_list(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         load_config(write_config(tmp_path, "monitors: []\n"))
+
+
+def test_load_config_redacts_invalid_utf8_bytes(tmp_path: Path) -> None:
+    sentinel = "sentinel-invalid-utf8"
+    raw = f"webhook: {sentinel}".encode() + b"\xff\n"
+    path = tmp_path / "invalid-utf8.yaml"
+    path.write_bytes(raw)
+
+    with pytest.raises(ValueError) as exc_info:
+        load_config(path)
+
+    error = exc_info.value
+    assert type(error) is ConfigError
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    surface = exception_surface(error)
+    assert "invalid_utf8" in str(error)
+    assert sentinel not in surface
+    assert repr(raw) not in surface
+
+
+@pytest.mark.parametrize("control_value", ["\x85value", "value\x85"])
+@pytest.mark.parametrize("field", ["id", "name", "categories"])
+def test_rejects_edge_control_characters_before_whitespace_stripping(
+    field: str, control_value: str
+) -> None:
+    monitor: dict[str, object] = {
+        "id": " monitor-id ",
+        "name": " Monitor ",
+        "url": "https://pay.ldxp.cn/shop/MONITOR",
+        "categories": [" Category "],
+    }
+    monitor[field] = [control_value] if field == "categories" else control_value
+
+    with pytest.raises(ValueError, match="control"):
+        AppConfig.model_validate({"monitors": [monitor]})
+
+
+def test_strips_ordinary_spaces_from_monitor_strings() -> None:
+    config = AppConfig.model_validate(
+        {
+            "monitors": [
+                {
+                    "id": " monitor-id ",
+                    "name": " Monitor ",
+                    "url": "https://pay.ldxp.cn/shop/MONITOR",
+                    "categories": [" Category "],
+                }
+            ]
+        }
+    )
+
+    monitor = config.monitors[0]
+    assert (monitor.id, monitor.name, monitor.categories) == (
+        "monitor-id",
+        "Monitor",
+        ("Category",),
+    )

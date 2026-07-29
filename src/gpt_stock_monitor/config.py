@@ -10,9 +10,9 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import (
-    AfterValidator,
     AnyHttpUrl,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
@@ -28,8 +28,8 @@ def _contains_control_character(value: str) -> bool:
     return any(unicodedata.category(character) == "Cc" for character in value)
 
 
-def _reject_control_characters(value: str) -> str:
-    if _contains_control_character(value):
+def _reject_control_characters(value: Any) -> Any:
+    if isinstance(value, str) and _contains_control_character(value):
         raise ValueError("value must not contain control characters")
     return value
 
@@ -37,7 +37,7 @@ def _reject_control_characters(value: str) -> str:
 NonEmptyStr = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
-    AfterValidator(_reject_control_characters),
+    BeforeValidator(_reject_control_characters),
 ]
 SHOP_PATH = re.compile(r"^/shop/(?P<shop_id>[A-Za-z0-9_-]+)$")
 URL_ADAPTER = TypeAdapter(AnyHttpUrl)
@@ -134,11 +134,22 @@ class AppConfig(BaseModel):
 
 def load_config(path: Path) -> AppConfig:
     """Read a UTF-8 YAML configuration file and validate its structure."""
+    config_text: str | None = None
+    decode_error = False
+    try:
+        config_text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        decode_error = True
+    if decode_error:
+        raise ConfigError("document: invalid_utf8")
+
+    assert config_text is not None
     yaml_error = False
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document = yaml.safe_load(config_text)
     except yaml.YAMLError:
         yaml_error = True
+    config_text = None
     if yaml_error:
         raise ConfigError("yaml: parse_error")
 
