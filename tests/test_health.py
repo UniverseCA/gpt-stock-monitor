@@ -274,6 +274,61 @@ def test_record_failure_redacts_quoted_mapping_values_on_all_surfaces(
     assert all(sentinel not in surface for surface in surfaces)
 
 
+@pytest.mark.parametrize(
+    ("reason", "forbidden_fragments"),
+    [
+        (
+            'site navigation failed '
+            '(headers={"X-API-Key": "SENTINEL-XAPI"}) retry pending',
+            ("SENTINEL-XAPI",),
+        ),
+        (
+            "site navigation failed "
+            "(headers={'x-api-key': 'SENTINEL-XAPI-SINGLE'}) retry pending",
+            ("SENTINEL-XAPI-SINGLE",),
+        ),
+        (
+            "site navigation failed "
+            "(headers={'Proxy-Authorization': 'Basic SENTINEL-PROXY WITHSPACE'}) "
+            "retry pending",
+            ("SENTINEL-PROXY", "WITHSPACE"),
+        ),
+        (
+            'site navigation failed '
+            '(Authorization: Bearer "SENTINEL-QUOTED WITHSPACE"); retry pending',
+            ("SENTINEL-QUOTED", "WITHSPACE"),
+        ),
+    ],
+    ids=["json-x-api-key", "python-x-api-key", "proxy-authorization", "quoted-bearer"],
+)
+def test_record_failure_redacts_sensitive_key_variants_and_full_values(
+    reason: str, forbidden_fragments: tuple[str, ...]
+) -> None:
+    key = state_key("demo", "GPT Plus")
+
+    transition = record_failure(StateDocument(), key, reason)
+    stored_reason = transition.state.health[key].last_error
+    surfaces = (
+        serialize_state(transition.state).decode(),
+        transition.state.model_dump_json(),
+        str(transition.events),
+        repr(transition.events),
+        str(transition),
+        repr(transition),
+    )
+
+    assert stored_reason is not None
+    assert "site navigation failed" in stored_reason
+    assert "retry pending" in stored_reason
+    assert "(" in stored_reason and ")" in stored_reason
+    assert "<redacted>" in stored_reason
+    assert all(
+        fragment not in surface
+        for surface in surfaces
+        for fragment in forbidden_fragments
+    )
+
+
 def test_record_success_is_silent_without_failures_and_preserves_other_state() -> None:
     key = state_key("demo", "GPT Plus")
     original = make_state()

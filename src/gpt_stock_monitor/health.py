@@ -29,20 +29,19 @@ __all__ = [
 _MAX_REASON_LENGTH = 240
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 _SENSITIVE_KEY_PATTERN = (
-    r"(?:authorization|[a-z0-9_-]*(?:cookie|password|passwd|token|secret)|api[_-]?key)"
+    r"[a-z0-9_-]*(?:authorization|api[-_]?key|cookie|password|passwd|token|secret)"
+    r"[a-z0-9_-]*"
+)
+_SENSITIVE_PAIR_PREFIX = (
+    rf"(?<![a-z0-9_-])[\"']?{_SENSITIVE_KEY_PATTERN}[\"']?\s*[:=]\s*"
 )
 _QUOTED_SECRET_PATTERN = re.compile(
-    rf"(?<![a-z0-9_-])[\"']?{_SENSITIVE_KEY_PATTERN}[\"']?\s*[:=]\s*"
+    _SENSITIVE_PAIR_PREFIX +
     r'(?:"[^"]*"|\'[^\']*\')',
     re.IGNORECASE,
 )
-_AUTHORIZATION_PATTERN = re.compile(
-    r"\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
-    re.IGNORECASE,
-)
-_SECRET_VALUE_PATTERN = re.compile(
-    r"\b([a-z0-9_-]*(?:cookie|password|passwd|token|secret)|api[_-]?key)"
-    r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+_UNQUOTED_SECRET_PATTERN = re.compile(
+    _SENSITIVE_PAIR_PREFIX + r"[^,;}\])\r\n]*",
     re.IGNORECASE,
 )
 
@@ -109,11 +108,7 @@ def _sanitize_reason(reason: str) -> str:
     text = " ".join(text.split())
     text = _URL_PATTERN.sub("<url>", text)
     text = _QUOTED_SECRET_PATTERN.sub("<redacted>", text)
-    text = _AUTHORIZATION_PATTERN.sub("authorization=<redacted>", text)
-    text = _SECRET_VALUE_PATTERN.sub(
-        lambda match: f"{match.group(1)}=<redacted>",
-        text,
-    )
+    text = _UNQUOTED_SECRET_PATTERN.sub("<redacted>", text)
     if len(text) > _MAX_REASON_LENGTH:
         text = f"{text[: _MAX_REASON_LENGTH - 3].rstrip()}..."
     return text
