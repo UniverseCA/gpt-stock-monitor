@@ -146,23 +146,50 @@ def test_record_failure_converts_reason_once_for_consistent_pure_data() -> None:
 
 
 @pytest.mark.parametrize(
-    ("reason", "sentinel"),
+    ("reason", "sentinel", "expected_reason"),
     [
         (
             "site navigation failed at "
             "https://open.feishu.cn/open-apis/bot/v2/hook/SENTINEL-WEBHOOK",
             "SENTINEL-WEBHOOK",
+            "site navigation failed at <url>",
         ),
-        ("site navigation failed; Authorization: Bearer SENTINEL-AUTH", "SENTINEL-AUTH"),
-        ("site navigation failed; Cookie=session=SENTINEL-COOKIE", "SENTINEL-COOKIE"),
-        ("site navigation failed; password=SENTINEL-PASSWORD", "SENTINEL-PASSWORD"),
-        ("site navigation failed; ToKeN: SENTINEL-TOKEN", "SENTINEL-TOKEN"),
-        ("site navigation failed; secret = SENTINEL-SECRET", "SENTINEL-SECRET"),
-        ("site navigation failed; client_secret=SENTINEL-CLIENT", "SENTINEL-CLIENT"),
+        (
+            "site navigation failed; Authorization: Bearer SENTINEL-AUTH",
+            "SENTINEL-AUTH",
+            "monitor failure: <redacted>",
+        ),
+        (
+            "site navigation failed; Cookie=session=SENTINEL-COOKIE",
+            "SENTINEL-COOKIE",
+            "monitor failure: <redacted>",
+        ),
+        (
+            "site navigation failed; password=SENTINEL-PASSWORD",
+            "SENTINEL-PASSWORD",
+            "monitor failure: <redacted>",
+        ),
+        (
+            "site navigation failed; ToKeN: SENTINEL-TOKEN",
+            "SENTINEL-TOKEN",
+            "monitor failure: <redacted>",
+        ),
+        (
+            "site navigation failed; secret = SENTINEL-SECRET",
+            "SENTINEL-SECRET",
+            "monitor failure: <redacted>",
+        ),
+        (
+            "site navigation failed; client_secret=SENTINEL-CLIENT",
+            "SENTINEL-CLIENT",
+            "monitor failure: <redacted>",
+        ),
     ],
     ids=["url", "authorization", "cookie", "password", "token", "secret", "prefixed-secret"],
 )
-def test_record_failure_redacts_sensitive_reason_values(reason: str, sentinel: str) -> None:
+def test_record_failure_redacts_sensitive_reason_values(
+    reason: str, sentinel: str, expected_reason: str
+) -> None:
     key = state_key("demo", "GPT Plus")
 
     transition = record_failure(StateDocument(), key, reason)
@@ -170,9 +197,8 @@ def test_record_failure_redacts_sensitive_reason_values(reason: str, sentinel: s
     event_reason = transition.events[0].reason  # type: ignore[union-attr]
 
     assert stored_reason == event_reason
-    assert stored_reason is not None
+    assert stored_reason == expected_reason
     assert sentinel not in stored_reason
-    assert "site navigation failed" in stored_reason
 
 
 def test_record_failure_has_safe_bounded_reason_on_all_transition_surfaces() -> None:
@@ -215,9 +241,7 @@ def test_record_failure_has_safe_bounded_reason_on_all_transition_surfaces() -> 
     )
 
     assert stored_reason == event_reason
-    assert stored_reason is not None
-    assert "site navigation failed" in stored_reason
-    assert "<url>" in stored_reason
+    assert stored_reason == "monitor failure: <redacted>"
     assert "\r" not in stored_reason
     assert "\n" not in stored_reason
     assert len(stored_reason) <= 240
@@ -266,11 +290,7 @@ def test_record_failure_redacts_quoted_mapping_values_on_all_surfaces(
         repr(transition),
     )
 
-    assert stored_reason is not None
-    assert "site navigation failed" in stored_reason
-    assert "retry pending" in stored_reason
-    assert "(" in stored_reason and ")" in stored_reason
-    assert "<redacted>" in stored_reason
+    assert stored_reason == "monitor failure: <redacted>"
     assert all(sentinel not in surface for surface in surfaces)
 
 
@@ -317,16 +337,45 @@ def test_record_failure_redacts_sensitive_key_variants_and_full_values(
         repr(transition),
     )
 
-    assert stored_reason is not None
-    assert "site navigation failed" in stored_reason
-    assert "retry pending" in stored_reason
-    assert "(" in stored_reason and ")" in stored_reason
-    assert "<redacted>" in stored_reason
+    assert stored_reason == "monitor failure: <redacted>"
     assert all(
         fragment not in surface
         for surface in surfaces
         for fragment in forbidden_fragments
     )
+
+
+@pytest.mark.parametrize(
+    ("reason", "sentinel"),
+    [
+        (
+            r'headers={\"Authorization\": \"Bearer \\\"SENTINEL-ESCAPED WITHSPACE\\\"\"}',
+            "SENTINEL-ESCAPED",
+        ),
+        (r"failure {{'client_secret':: [[\\SENTINEL-NESTED]]", "SENTINEL-NESTED"),
+        (r"failure path\\proxy_authorization\\SENTINEL-BACKSLASH", "SENTINEL-BACKSLASH"),
+        (r"failure (((cookie\\=\\SENTINEL-MALFORMED", "SENTINEL-MALFORMED"),
+    ],
+    ids=["escaped-quotes", "nested", "backslashes", "unbalanced"],
+)
+def test_record_failure_uses_fixed_fallback_for_malformed_sensitive_reasons(
+    reason: str, sentinel: str
+) -> None:
+    key = state_key("demo", "GPT Plus")
+
+    transition = record_failure(StateDocument(), key, reason)
+    stored_reason = transition.state.health[key].last_error
+    surfaces = (
+        serialize_state(transition.state).decode(),
+        transition.state.model_dump_json(),
+        str(transition.events),
+        repr(transition.events),
+        str(transition),
+        repr(transition),
+    )
+
+    assert stored_reason == "monitor failure: <redacted>"
+    assert all(sentinel not in surface for surface in surfaces)
 
 
 def test_record_success_is_silent_without_failures_and_preserves_other_state() -> None:

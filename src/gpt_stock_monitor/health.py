@@ -27,23 +27,17 @@ __all__ = [
 ]
 
 _MAX_REASON_LENGTH = 240
+_REDACTED_REASON = "monitor failure: <redacted>"
+_SENSITIVE_REASON_CORES = (
+    "authorization",
+    "api-key",
+    "api_key",
+    "cookie",
+    "password",
+    "token",
+    "secret",
+)
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
-_SENSITIVE_KEY_PATTERN = (
-    r"[a-z0-9_-]*(?:authorization|api[-_]?key|cookie|password|passwd|token|secret)"
-    r"[a-z0-9_-]*"
-)
-_SENSITIVE_PAIR_PREFIX = (
-    rf"(?<![a-z0-9_-])[\"']?{_SENSITIVE_KEY_PATTERN}[\"']?\s*[:=]\s*"
-)
-_QUOTED_SECRET_PATTERN = re.compile(
-    _SENSITIVE_PAIR_PREFIX +
-    r'(?:"[^"]*"|\'[^\']*\')',
-    re.IGNORECASE,
-)
-_UNQUOTED_SECRET_PATTERN = re.compile(
-    _SENSITIVE_PAIR_PREFIX + r"[^,;}\])\r\n]*",
-    re.IGNORECASE,
-)
 
 
 class HealthEventKind(StrEnum):
@@ -101,14 +95,14 @@ def _should_notify_failure(count: int) -> bool:
 
 def _sanitize_reason(reason: str) -> str:
     text = str(reason)
+    if any(core in text.casefold() for core in _SENSITIVE_REASON_CORES):
+        return _REDACTED_REASON
     text = "".join(
         " " if unicodedata.category(character).startswith("C") else character
         for character in text
     )
     text = " ".join(text.split())
     text = _URL_PATTERN.sub("<url>", text)
-    text = _QUOTED_SECRET_PATTERN.sub("<redacted>", text)
-    text = _UNQUOTED_SECRET_PATTERN.sub("<redacted>", text)
     if len(text) > _MAX_REASON_LENGTH:
         text = f"{text[: _MAX_REASON_LENGTH - 3].rstrip()}..."
     return text
