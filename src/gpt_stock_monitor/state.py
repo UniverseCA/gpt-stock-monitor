@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
@@ -42,6 +43,8 @@ def load_state(path: Path) -> StateDocument:
         payload = json.loads(contents)
         if not isinstance(payload, dict):
             raise ValueError
+        if set(payload) - set(StateDocument.model_fields):
+            raise ValueError
         return StateDocument.model_validate(payload)
     except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError, TypeError):
         raise StateError("invalid state document") from None
@@ -68,16 +71,28 @@ def write_state_atomic(path: Path, state: StateDocument) -> None:
     )
     temporary_path = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "wb") as temporary_file:
+        try:
+            temporary_file = os.fdopen(descriptor, "wb")
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        with temporary_file:
             temporary_file.write(serialize_state(state))
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
         os.replace(temporary_path, path)
     finally:
+        has_primary_error = sys.exc_info()[0] is not None
         try:
             temporary_path.unlink()
         except FileNotFoundError:
             pass
+        except OSError:
+            if not has_primary_error:
+                raise
 
 
 def prune_unconfigured(state: StateDocument, active_keys: set[str]) -> StateDocument:

@@ -98,6 +98,14 @@ def test_load_state_rejects_invalid_documents_without_echoing_contents(
     assert contents.decode("utf-8", errors="ignore") not in str(caught.value)
 
 
+def test_load_state_rejects_unknown_top_level_field(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text('{"schema_version": 1, "snapshosts": {}}', encoding="utf-8")
+
+    with pytest.raises(StateError, match=r"^invalid state document$"):
+        load_state(path)
+
+
 def test_serialize_state_is_identical_for_semantically_identical_mapping_order() -> None:
     first = make_populated_state()
     second = StateDocument(
@@ -212,6 +220,35 @@ def test_write_state_atomic_preserves_old_file_and_cleans_temp_when_replace_fail
     assert target.read_bytes() == old_contents
     assert observed_source is not None
     assert not observed_source.exists()
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_write_state_atomic_closes_raw_descriptor_when_fdopen_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class SentinelError(Exception):
+        pass
+
+    target = tmp_path / "state.json"
+    old_contents = b"old state"
+    target.write_bytes(old_contents)
+    observed_descriptor: int | None = None
+
+    def failing_fdopen(descriptor: int, mode: str) -> None:
+        nonlocal observed_descriptor
+        observed_descriptor = descriptor
+        assert mode == "wb"
+        raise SentinelError("fdopen sentinel")
+
+    monkeypatch.setattr("gpt_stock_monitor.state.os.fdopen", failing_fdopen)
+
+    with pytest.raises(SentinelError, match="fdopen sentinel"):
+        write_state_atomic(target, make_populated_state())
+
+    assert observed_descriptor is not None
+    with pytest.raises(OSError):
+        os.fstat(observed_descriptor)
+    assert target.read_bytes() == old_contents
     assert list(tmp_path.iterdir()) == [target]
 
 
