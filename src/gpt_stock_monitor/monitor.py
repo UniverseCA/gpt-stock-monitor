@@ -33,12 +33,11 @@ from gpt_stock_monitor.sites.base import (
 )
 from gpt_stock_monitor.state import (
     PublishStatus,
-    StateError,
     StateRepository,
+    StateRepositoryError,
     VersionedState,
     prune_unconfigured,
 )
-from gpt_stock_monitor.state_git import StateGitError
 
 _SITE_ERRORS = (
     SiteNavigationError,
@@ -46,7 +45,6 @@ _SITE_ERRORS = (
     CategoryNotFoundError,
     SuspiciousExtractionError,
 )
-_STATE_ERRORS = (StateError, StateGitError)
 
 
 class Notifier(Protocol):
@@ -297,11 +295,8 @@ async def _drain_pending(
     current: VersionedState,
     notifier: Notifier,
 ) -> VersionedState | RunResult:
-    drained_batches = 0
     while True:
         if current.document.pending_events:
-            if drained_batches >= 3:
-                return RunResult(3, _output(current.document))
             for event in current.document.pending_events:
                 if event.event_id in current.document.delivered_event_ids:
                     continue
@@ -324,15 +319,14 @@ async def _drain_pending(
                     return RunResult(3, _output(current.document))
                 try:
                     confirmed = await _confirm_delivery(repository, current, active_event.event_id)
-                except _STATE_ERRORS:
+                except StateRepositoryError:
                     return RunResult(3, _output(current.document))
                 if confirmed is None:
                     return RunResult(3, _output(current.document))
                 current = confirmed
-            drained_batches += 1
         try:
             current = repository.load()
-        except _STATE_ERRORS:
+        except StateRepositoryError:
             return RunResult(3, {"error": "state load failed"})
         if not current.document.pending_events:
             return current
@@ -353,7 +347,7 @@ async def run_once(
 
     try:
         current = state_repo.load()
-    except _STATE_ERRORS:
+    except StateRepositoryError:
         return RunResult(3, {"error": "state load failed"})
 
     if not dry_run:
@@ -381,14 +375,14 @@ async def run_once(
                 published = state_repo.publish(
                     current.version, staged, "update one-shot monitor state"
                 )
-            except _STATE_ERRORS:
+            except StateRepositoryError:
                 return RunResult(3, _summary(applied, current.document))
             if published.status is not PublishStatus.CONFLICT:
                 current = VersionedState(published.remote_version, staged)
                 break
             try:
                 current = state_repo.load()
-            except _STATE_ERRORS:
+            except StateRepositoryError:
                 return RunResult(3, _summary(applied, current.document))
             if current.document.pending_events:
                 return RunResult(3, _summary(applied, current.document))
@@ -416,7 +410,7 @@ async def run_once(
             return RunResult(3, _summary(applied, current.document))
         try:
             confirmed = await _confirm_delivery(state_repo, current, staged_event.event_id)
-        except _STATE_ERRORS:
+        except StateRepositoryError:
             return RunResult(3, _summary(applied, current.document))
         if confirmed is None:
             return RunResult(3, _summary(applied, current.document))

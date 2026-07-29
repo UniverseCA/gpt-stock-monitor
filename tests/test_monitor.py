@@ -2,18 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
+import gpt_stock_monitor.monitor as monitor_module
 from gpt_stock_monitor.config import AppConfig
-from gpt_stock_monitor.models import PendingEvent, Product, Snapshot, StateDocument, state_key
+from gpt_stock_monitor.models import (
+    Availability,
+    PendingEvent,
+    Product,
+    Snapshot,
+    StateDocument,
+    state_key,
+)
 from gpt_stock_monitor.monitor import run_once
 from gpt_stock_monitor.notifiers.feishu import FeishuError
 from gpt_stock_monitor.sites.base import CategoryObservation
-from gpt_stock_monitor.state import PublishResult, PublishStatus, VersionedState
+from gpt_stock_monitor.state import (
+    PublishResult,
+    PublishStatus,
+    StateRepositoryError,
+    VersionedState,
+)
 
 CHECKED_AT = datetime(2026, 7, 29, 4, 0, tzinfo=UTC)
 
@@ -158,7 +172,7 @@ def product(*, price: str = "10") -> Product:
         name="Product",
         price=price,
         price_text=f"¥{price}",
-        availability="in_stock",
+        availability=Availability.IN_STOCK,
         stock_text="available",
     )
 
@@ -471,21 +485,25 @@ def test_pending_injected_by_post_drain_reload_is_handled_before_collection() ->
     assert adapter.calls == []
 
 
-def test_continuously_injected_pending_batches_stop_before_collection() -> None:
-    class EndlessRepository(MemoryRepository):
+def test_four_injected_pending_batches_are_all_drained_before_collection() -> None:
+    class FourBatchRepository(MemoryRepository):
         def load(self) -> VersionedState:
             self.loads += 1
             sequence = self.loads
-            self.current = VersionedState(
-                f"load-{sequence}",
-                StateDocument(
-                    pending_events=(pending(sequence, f"old-{sequence}"),),
-                    next_event_sequence=sequence + 1,
-                ),
-            )
+            if sequence <= 4:
+                self.current = VersionedState(
+                    f"load-{sequence}",
+                    StateDocument(
+                        pending_events=(pending(sequence, f"old-{sequence}"),),
+                        delivered_event_ids=tuple(
+                            f"old-{delivered}" for delivered in range(1, sequence)
+                        ),
+                        next_event_sequence=sequence + 1,
+                    ),
+                )
             return self.current
 
-    repository = EndlessRepository(StateDocument())
+    repository = FourBatchRepository(StateDocument())
     adapter = Adapter()
     notifier = Notifier()
 
@@ -493,9 +511,14 @@ def test_continuously_injected_pending_batches_stop_before_collection() -> None:
         run_once(app_config(), repository, adapter, notifier, dry_run=False, checked_at=CHECKED_AT)
     )
 
-    assert result.exit_code == 3
-    assert len(notifier.calls) == 3
-    assert adapter.calls == []
+    assert result.exit_code == 0
+    assert [call[0]["content"]["text"] for call in notifier.calls] == [
+        "old-1",
+        "old-2",
+        "old-3",
+        "old-4",
+    ]
+    assert adapter.calls == ["shop-a"]
 
 
 @pytest.mark.parametrize(
@@ -581,3 +604,30 @@ def test_repository_assertion_error_propagates() -> None:
                 checked_at=CHECKED_AT,
             )
         )
+
+
+def test_repository_boundary_error_is_a_safe_exit_three() -> None:
+    class FailingRepository(MemoryRepository):
+        def load(self) -> VersionedState:
+            raise StateRepositoryError("safe repository failure")
+
+    result = asyncio.run(
+        run_once(
+            app_config(),
+            FailingRepository(StateDocument()),
+            Adapter(),
+            Notifier(),
+            dry_run=False,
+            checked_at=CHECKED_AT,
+        )
+    )
+
+    assert result.exit_code == 3
+    assert result.output == {"error": "state load failed"}
+
+
+def test_monitor_does_not_import_concrete_state_git_backend() -> None:
+    source = inspect.getsource(monitor_module)
+
+    assert "gpt_stock_monitor.state_git" not in source
+    assert "StateGitError" not in source
