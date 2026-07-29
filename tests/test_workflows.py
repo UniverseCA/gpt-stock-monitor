@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -9,9 +10,26 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-APPROVED_ACTIONS = {
-    "actions/checkout": "df4cb1c069e1874edd31b4311f1884172cec0e10",
-    "actions/setup-python": "a309ff8b426b58ec0e2a45f0f869d46889d02405",
+APPROVED_ACTIONS: dict[str, tuple[str, str]] = {
+    "actions/checkout": ("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6.0.3"),
+    "actions/setup-python": ("a309ff8b426b58ec0e2a45f0f869d46889d02405", "v6.2.0"),
+}
+EXPECTED_MONITOR_JOB_ENV = {
+    "TMPDIR": "${{ runner.temp }}",
+    "GIT_AUTHOR_NAME": "github-actions[bot]",
+    "GIT_AUTHOR_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
+    "GIT_COMMITTER_NAME": "github-actions[bot]",
+    "GIT_COMMITTER_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
+}
+EXPECTED_INSTALL_COMMANDS = {
+    "ci.yml": (
+        'python -m pip install -e ".[dev]"',
+        "python -m playwright install --with-deps chromium",
+    ),
+    "monitor.yml": (
+        "python -m pip install .",
+        "python -m playwright install --with-deps chromium",
+    ),
 }
 
 
@@ -30,23 +48,110 @@ def steps_for(data: dict[str, Any], job: str) -> list[dict[str, Any]]:
     return steps
 
 
+def all_steps(data: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        step
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+        if isinstance(step, dict)
+    ]
+
+
+def nested_values(node: Any, key: str) -> list[str]:
+    values: list[str] = []
+    if isinstance(node, dict):
+        for nested_key, value in node.items():
+            if nested_key == key:
+                assert isinstance(value, str)
+                values.append(value)
+            values.extend(nested_values(value, key))
+    elif isinstance(node, list):
+        for value in node:
+            values.extend(nested_values(value, key))
+    return values
+
+
+def assert_action_contract(text: str) -> None:
+    data = yaml.load(text, Loader=yaml.BaseLoader)
+    parsed_uses = nested_values(data, "uses")
+    line_pattern = re.compile(
+        r"^\s*(?:-\s*)?uses:\s*"
+        r"(?P<action>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
+        r"@(?P<sha>[0-9a-f]{40})\s+#\s+(?P<version>v\d+\.\d+\.\d+)\s*$"
+    )
+    validated: list[str] = []
+    for line in text.splitlines():
+        match = line_pattern.fullmatch(line)
+        if match is None:
+            continue
+        action = match.group("action")
+        assert action in APPROVED_ACTIONS
+        expected_sha, expected_version = APPROVED_ACTIONS[action]
+        assert match.group("sha") == expected_sha
+        assert match.group("version") == expected_version
+        validated.append(f"{action}@{match.group('sha')}")
+
+    assert parsed_uses
+    assert len(validated) == len(parsed_uses)
+    assert validated == parsed_uses
+
+
+def assert_monitor_secret_contract(data: dict[str, Any], text: str) -> None:
+    webhook_key = "FEISHU_WEBHOOK_URL"
+    secret_reference = "${{ secrets.FEISHU_WEBHOOK_URL }}"
+    top_level_env = data.get("env") or {}
+    assert webhook_key not in top_level_env
+
+    job = data["jobs"]["monitor"]
+    assert job["env"] == EXPECTED_MONITOR_JOB_ENV
+    assert text.count("secrets.FEISHU_WEBHOOK_URL") == 1
+
+    steps = steps_for(data, "monitor")
+    live = next(step for step in steps if step.get("run", "").strip() == "gpt-stock-monitor")
+    dry = next(
+        step for step in steps if step.get("run", "").strip() == "gpt-stock-monitor --dry-run"
+    )
+    assert live["env"] == {webhook_key: secret_reference}
+    assert webhook_key not in dry.get("env", {})
+
+
+def assert_monitor_cli_contract(data: dict[str, Any]) -> None:
+    command_steps = [step for step in all_steps(data) if "gpt-stock-monitor" in step.get("run", "")]
+    commands = [step["run"].strip() for step in command_steps]
+    assert commands == ["gpt-stock-monitor", "gpt-stock-monitor --dry-run"]
+
+    live, dry = command_steps
+    assert live["if"] == "github.event_name == 'schedule' || inputs.dry_run == false"
+    assert dry["if"] == "github.event_name == 'workflow_dispatch' && inputs.dry_run == true"
+
+
+def assert_install_contract(name: str, data: dict[str, Any]) -> None:
+    install_commands = [
+        step["run"].strip()
+        for step in all_steps(data)
+        if re.search(r"\binstall\b", step.get("run", ""))
+    ]
+    assert install_commands == list(EXPECTED_INSTALL_COMMANDS[name])
+
+
+def assert_no_force_push(data: dict[str, Any]) -> None:
+    for step in all_steps(data):
+        command = step.get("run", "")
+        assert not re.search(r"\bgit\s+config\s+--global\b", command)
+        for match in re.finditer(r"(?im)\bgit[ \t]+push\b(?P<args>[^\r\n;&|]*)", command):
+            tokens = shlex.split(match.group("args"), posix=True)
+            assert not any(token.startswith("--force") for token in tokens)
+            assert not any(
+                token.startswith("-") and not token.startswith("--") and "f" in token[1:]
+                for token in tokens
+            )
+            assert not any(token.startswith("+") for token in tokens)
+
+
 @pytest.mark.parametrize("name", ["ci.yml", "monitor.yml"])
 def test_actions_are_allowlisted_sha_pinned_and_version_commented(name: str) -> None:
     data, text = load_workflow(name)
-    uses_lines = [line for line in text.splitlines() if re.match(r"^\s*uses:", line)]
-    assert uses_lines
-
-    for line in uses_lines:
-        match = re.fullmatch(
-            r"\s*uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
-            r"@([0-9a-f]{40})\s+#\s+v\d+\.\d+\.\d+\s*",
-            line,
-        )
-        assert match, f"action must use a 40-character SHA and version comment: {line}"
-        action, sha = match.groups()
-        assert action in APPROVED_ACTIONS
-        assert sha == APPROVED_ACTIONS[action]
-
+    assert_action_contract(text)
     assert data["permissions"] in ({"contents": "read"}, {"contents": "write"})
 
 
@@ -88,15 +193,8 @@ def test_ci_uses_python_312_pip_cache_and_expected_quality_commands() -> None:
 
 def test_workflows_install_only_through_approved_python_and_playwright_paths() -> None:
     for name in ("ci.yml", "monitor.yml"):
-        _, text = load_workflow(name)
-        lowered = text.lower()
-        assert "curl " not in lowered
-        assert "wget " not in lowered
-        assert "pip install git+" not in lowered
-        assert "--index-url" not in lowered
-        assert "--extra-index-url" not in lowered
-        assert "playwright install chromium" not in lowered
-        assert "python -m playwright install --with-deps chromium" in lowered
+        data, _ = load_workflow(name)
+        assert_install_contract(name, data)
 
 
 def test_monitor_has_only_scheduled_and_safe_manual_triggers() -> None:
@@ -124,13 +222,7 @@ def test_monitor_job_is_bounded_and_uses_isolated_temp_state_and_bot_identity() 
 
     assert job["runs-on"] == "ubuntu-latest"
     assert int(job["timeout-minutes"]) > 0
-    assert job["env"] == {
-        "TMPDIR": "${{ runner.temp }}",
-        "GIT_AUTHOR_NAME": "github-actions[bot]",
-        "GIT_AUTHOR_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
-        "GIT_COMMITTER_NAME": "github-actions[bot]",
-        "GIT_COMMITTER_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
-    }
+    assert job["env"] == EXPECTED_MONITOR_JOB_ENV
 
     steps = steps_for(data, "monitor")
     setup_python = next(
@@ -143,28 +235,122 @@ def test_monitor_job_is_bounded_and_uses_isolated_temp_state_and_bot_identity() 
 
 
 def test_monitor_executes_exactly_one_of_live_and_dry_run_commands() -> None:
-    data, _ = load_workflow("monitor.yml")
-    command_steps = [
-        step
-        for step in steps_for(data, "monitor")
-        if step.get("run", "").strip() in {"gpt-stock-monitor", "gpt-stock-monitor --dry-run"}
+    data, text = load_workflow("monitor.yml")
+    assert_monitor_cli_contract(data)
+    assert_monitor_secret_contract(data, text)
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "monitor.yml"])
+def test_workflows_forbid_global_git_config_and_force_push(name: str) -> None:
+    data, _ = load_workflow(name)
+    assert_no_force_push(data)
+
+
+def test_action_contract_accepts_dash_uses_and_rejects_pin_mutations() -> None:
+    _, text = load_workflow("ci.yml")
+    dash_uses = text.replace("        uses:", "      - uses:", 1)
+    assert_action_contract(dash_uses)
+
+    mutants = [
+        text.replace("# v6.0.3", "# v6.0.4", 1),
+        text.replace(
+            "    steps:\n",
+            "    steps:\n"
+            "      - {uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10}\n",
+            1,
+        ),
     ]
-    assert len(command_steps) == 2
-
-    by_command = {step["run"].strip(): step for step in command_steps}
-    live = by_command["gpt-stock-monitor"]
-    dry = by_command["gpt-stock-monitor --dry-run"]
-    assert live["if"] == "github.event_name == 'schedule' || inputs.dry_run == false"
-    assert dry["if"] == "github.event_name == 'workflow_dispatch' && inputs.dry_run == true"
-    assert live["env"] == {"FEISHU_WEBHOOK_URL": "${{ secrets.FEISHU_WEBHOOK_URL }}"}
-    assert "env" not in dry or "FEISHU_WEBHOOK_URL" not in dry["env"]
+    for mutant in mutants:
+        with pytest.raises(AssertionError):
+            assert_action_contract(mutant)
 
 
-def test_monitor_forbids_global_git_config_and_force_push() -> None:
-    _, text = load_workflow("monitor.yml")
-    lowered = text.lower()
+def test_monitor_secret_contract_rejects_scope_mutations() -> None:
+    data, text = load_workflow("monitor.yml")
+    assert_monitor_secret_contract(data, text)
 
-    assert "git config --global" not in lowered
-    assert "git push --force" not in lowered
-    assert "git push -f" not in lowered
-    assert "--force-with-lease" not in lowered
+    mutants = [
+        text.replace(
+            "permissions:\n",
+            "env:\n  FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n\npermissions:\n",
+            1,
+        ),
+        text.replace(
+            "permissions:\n",
+            "env:\n  ALIAS: ${{secrets.FEISHU_WEBHOOK_URL}}\n\npermissions:\n",
+            1,
+        ),
+        text.replace(
+            "      TMPDIR: ${{ runner.temp }}\n",
+            "      TMPDIR: ${{ runner.temp }}\n"
+            "      FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
+            1,
+        ),
+        text.replace(
+            "        run: gpt-stock-monitor --dry-run\n",
+            "        run: gpt-stock-monitor --dry-run\n"
+            "        env:\n"
+            "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
+            1,
+        ),
+    ]
+    for mutant in mutants:
+        mutant_data = yaml.load(mutant, Loader=yaml.BaseLoader)
+        with pytest.raises(AssertionError):
+            assert_monitor_secret_contract(mutant_data, mutant)
+
+
+def test_monitor_cli_contract_rejects_extra_invocations() -> None:
+    data, text = load_workflow("monitor.yml")
+    assert_monitor_cli_contract(data)
+
+    mutants = [
+        text
+        + "\n      - name: Hidden second invocation\n"
+        + "        run: echo duplicate && gpt-stock-monitor\n",
+        text
+        + "\n  hidden-job:\n"
+        + "    runs-on: ubuntu-latest\n"
+        + "    steps:\n"
+        + "      - run: gpt-stock-monitor\n",
+    ]
+    for mutant in mutants:
+        with pytest.raises(AssertionError):
+            assert_monitor_cli_contract(yaml.load(mutant, Loader=yaml.BaseLoader))
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "monitor.yml"])
+def test_install_contract_rejects_unapproved_install_commands(name: str) -> None:
+    data, text = load_workflow(name)
+    assert_install_contract(name, data)
+    mutant = (
+        text
+        + "\n      - name: Install unapproved package\n"
+        + "        run: python -m pip install unapproved-package\n"
+    )
+
+    with pytest.raises(AssertionError):
+        assert_install_contract(name, yaml.load(mutant, Loader=yaml.BaseLoader))
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "monitor.yml"])
+def test_force_push_contract_rejects_variants_without_false_positives(name: str) -> None:
+    data, text = load_workflow(name)
+    assert_no_force_push(data)
+
+    safe_text = (
+        text
+        + "\n      - name: Pip option is not Git\n"
+        + "        run: python -m pip install --force-reinstall .\n"
+    )
+    assert_no_force_push(yaml.load(safe_text, Loader=yaml.BaseLoader))
+
+    for command in (
+        "git push --force origin HEAD",
+        "git push --force-with-lease origin HEAD",
+        "git push -f origin HEAD",
+        "git push origin +HEAD:main",
+    ):
+        mutant = text + f"\n      - name: Unsafe push\n        run: {command}\n"
+        with pytest.raises(AssertionError):
+            assert_no_force_push(yaml.load(mutant, Loader=yaml.BaseLoader))
