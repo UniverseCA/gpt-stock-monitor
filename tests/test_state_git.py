@@ -324,6 +324,40 @@ def test_partial_worktree_is_cleaned_when_worktree_add_fails(
     assert list(temp_root.iterdir()) == []
 
 
+def test_candidate_is_safely_cleaned_when_preparing_worktree_path_fails(
+    repositories: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, first, _ = repositories
+    temp_root = (tmp_path / "worktrees").resolve()
+    head_before = git(first, "rev-parse", "HEAD").stdout.strip()
+    status_before = git(first, "status", "--porcelain").stdout
+    worktrees_before = git(first, "worktree", "list", "--porcelain").stdout
+    real_rmdir = Path.rmdir
+    observed_candidate: Path | None = None
+
+    def fail_candidate_rmdir(path: Path) -> None:
+        nonlocal observed_candidate
+        if path.name.startswith("state-git-") and path.parent.resolve() == temp_root:
+            observed_candidate = path.resolve()
+            raise PermissionError("secret-token")
+        real_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_candidate_rmdir)
+
+    with pytest.raises(StateGitError, match=r"^state git temporary path failed$") as caught:
+        repository(first, temp_root).publish(None, populated_state("state"), "message")
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert "secret-token" not in str(caught.value)
+    assert observed_candidate is not None
+    assert observed_candidate.is_relative_to(temp_root)
+    assert list(temp_root.iterdir()) == []
+    assert git(first, "worktree", "list", "--porcelain").stdout == worktrees_before
+    assert git(first, "rev-parse", "HEAD").stdout.strip() == head_before
+    assert git(first, "status", "--porcelain").stdout == status_before
+
+
 def test_load_prunes_a_remote_tracking_branch_deleted_from_the_remote(
     repositories: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:

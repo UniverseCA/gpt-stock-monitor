@@ -183,14 +183,23 @@ class _TemporaryWorktree:
     def __enter__(self) -> Path:
         repository = self._repository
         repository._temp_root.mkdir(parents=True, exist_ok=True)
-        temporary = Path(tempfile.mkdtemp(prefix="state-git-", dir=repository._temp_root)).resolve()
-        if (
-            not temporary.is_relative_to(repository._temp_root)
-            or temporary == repository._temp_root
-        ):
-            raise StateGitError("state git temporary path failed")
-        temporary.rmdir()
-        self.path = temporary
+        candidate = Path(tempfile.mkdtemp(prefix="state-git-", dir=repository._temp_root))
+        self.path = candidate
+        try:
+            temporary = candidate.resolve()
+            if (
+                not temporary.is_relative_to(repository._temp_root)
+                or temporary == repository._temp_root
+            ):
+                raise StateGitError("state git temporary path failed")
+            self.path = temporary
+            temporary.rmdir()
+        except StateGitError:
+            self._discard_unregistered_candidate()
+            raise
+        except OSError:
+            self._discard_unregistered_candidate()
+            raise StateGitError("state git temporary path failed") from None
         if self._version is None:
             # A failed first push can leave its unborn local branch behind. Use the
             # verified unique worktree name so a later CAS attempt is independent;
@@ -242,3 +251,14 @@ class _TemporaryWorktree:
         )
         if path.exists():
             shutil.rmtree(path)
+
+    def _discard_unregistered_candidate(self) -> None:
+        if self.path is None:
+            return
+        repository = self._repository
+        try:
+            path = self.path.resolve()
+            if path.is_relative_to(repository._temp_root) and path != repository._temp_root:
+                shutil.rmtree(path)
+        except OSError:
+            pass
