@@ -112,8 +112,11 @@ def _validate_webhook_url(value: str) -> str | None:
         return None
     if (
         value != value.strip()
+        or "?" in value
+        or "#" in value
         or parsed.scheme != "https"
         or parsed.hostname != "open.feishu.cn"
+        or parsed.netloc not in {"open.feishu.cn", "open.feishu.cn:443"}
         or parsed.username is not None
         or parsed.password is not None
         or port not in (None, 443)

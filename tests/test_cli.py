@@ -128,6 +128,9 @@ def test_missing_webhook_is_safe_configuration_error(
         "https://open.feishu.cn/open-apis/bot/v2/hook/a",
         "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456?query=1",
         "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456#fragment",
+        "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456?",
+        "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456#",
+        "https://open.feishu.cn:/open-apis/bot/v2/hook/valid-token-123456",
     ],
     ids=[
         "http",
@@ -138,6 +141,9 @@ def test_missing_webhook_is_safe_configuration_error(
         "short-token",
         "query",
         "fragment",
+        "empty-query-delimiter",
+        "empty-fragment-delimiter",
+        "empty-port-delimiter",
     ],
 )
 def test_invalid_webhook_is_rejected_before_factory(
