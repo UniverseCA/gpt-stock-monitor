@@ -116,7 +116,7 @@ class StateDocument(BaseModel, frozen=True):
         default_factory=lambda: MappingProxyType({})
     )
     pending_events: tuple[PendingEvent, ...] = ()
-    delivered_event_ids: tuple[str, ...] = ()
+    delivered_event_ids: tuple[NonEmptyStr, ...] = ()
     next_event_sequence: int = Field(default=1, ge=1)
 
     @field_validator("snapshots", "health", "empty_candidates")
@@ -133,6 +133,16 @@ class StateDocument(BaseModel, frozen=True):
     def sort_pending_events(cls, events: tuple[PendingEvent, ...]) -> tuple[PendingEvent, ...]:
         return tuple(sorted(events, key=lambda event: (event.sequence, event.event_id)))
 
+    @field_validator("delivered_event_ids")
+    @classmethod
+    def copy_safe_delivered_event_ids(cls, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            any(ord(character) < 32 or ord(character) == 127 for character in event_id)
+            for event_id in event_ids
+        ):
+            raise ValueError("delivered event id contains control character")
+        return tuple(event_ids)
+
     @model_validator(mode="after")
     def validate_state_invariants(self) -> Self:
         for key, snapshot in self.snapshots.items():
@@ -142,6 +152,11 @@ class StateDocument(BaseModel, frozen=True):
         event_ids = [event.event_id for event in self.pending_events]
         if len(event_ids) != len(set(event_ids)):
             raise ValueError("duplicate pending event id")
+        delivered_event_ids = set(self.delivered_event_ids)
+        if len(self.delivered_event_ids) != len(delivered_event_ids):
+            raise ValueError("duplicate delivered event id")
+        if delivered_event_ids.intersection(event_ids):
+            raise ValueError("event id cannot be both pending and delivered")
         if (
             self.pending_events
             and max(event.sequence for event in self.pending_events) >= self.next_event_sequence

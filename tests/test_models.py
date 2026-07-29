@@ -94,6 +94,38 @@ def test_state_document_rejects_allocated_next_event_sequence() -> None:
         StateDocument(pending_events=(pending,), next_event_sequence=1)
 
 
+def test_state_document_rejects_event_id_that_is_pending_and_delivered() -> None:
+    pending = PendingEvent(sequence=1, event_id="event-1", message_parts=("pending",))
+
+    with pytest.raises(ValidationError, match="pending and delivered"):
+        StateDocument(
+            pending_events=(pending,),
+            delivered_event_ids=("event-1",),
+            next_event_sequence=2,
+        )
+
+
+def test_state_document_rejects_duplicate_delivered_event_ids() -> None:
+    with pytest.raises(ValidationError, match="duplicate delivered event id"):
+        StateDocument(delivered_event_ids=("event-1", "event-1"))
+
+
+@pytest.mark.parametrize("event_id", ["", "   ", "event\x00id", "event\nid"])
+def test_state_document_rejects_unsafe_delivered_event_id(event_id: str) -> None:
+    with pytest.raises(ValidationError):
+        StateDocument(delivered_event_ids=(event_id,))
+
+
+def test_state_document_copies_delivered_event_id_list_to_tuple() -> None:
+    source_ids = ["event-1"]
+
+    state = StateDocument(delivered_event_ids=source_ids)
+    source_ids.append("event-2")
+
+    assert state.delivered_event_ids == ("event-1",)
+    assert isinstance(state.delivered_event_ids, tuple)
+
+
 def test_state_document_sorts_pending_events_on_rebuild() -> None:
     later = PendingEvent(sequence=2, event_id="event-c", message_parts=("later",))
     tie_breaker = PendingEvent(sequence=1, event_id="event-b", message_parts=("b",))
