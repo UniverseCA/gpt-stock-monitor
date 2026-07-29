@@ -378,6 +378,56 @@ def test_record_failure_uses_fixed_fallback_for_malformed_sensitive_reasons(
     assert all(sentinel not in surface for surface in surfaces)
 
 
+@pytest.mark.parametrize(
+    ("reason", "sentinel"),
+    [
+        ("request failed apikey=SENTINEL-APIKEY", "SENTINEL-APIKEY"),
+        ("request failed passwd: SENTINEL-PASSWD", "SENTINEL-PASSWD"),
+        ("request failed custom_credential=SENTINEL-CUSTOM", "SENTINEL-CUSTOM"),
+        ("navigation timeout=30", "timeout=30"),
+    ],
+    ids=["apikey", "passwd", "unknown-credential", "structured-timeout"],
+)
+def test_record_failure_uses_fixed_fallback_for_any_structured_reason(
+    reason: str, sentinel: str
+) -> None:
+    key = state_key("demo", "GPT Plus")
+
+    transition = record_failure(StateDocument(), key, reason)
+    stored_reason = transition.state.health[key].last_error
+    surfaces = (
+        serialize_state(transition.state).decode(),
+        transition.state.model_dump_json(),
+        str(transition.events),
+        repr(transition.events),
+        str(transition),
+        repr(transition),
+    )
+
+    assert stored_reason == "monitor failure: <redacted>"
+    assert all(sentinel not in surface for surface in surfaces)
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (
+            "navigation failed https://example.invalid/path?retry=1",
+            "navigation failed <url>",
+        ),
+        ("navigation timeout", "navigation timeout"),
+    ],
+    ids=["url", "plain-timeout"],
+)
+def test_record_failure_preserves_safe_unstructured_reason(reason: str, expected: str) -> None:
+    key = state_key("demo", "GPT Plus")
+
+    transition = record_failure(StateDocument(), key, reason)
+
+    assert transition.state.health[key].last_error == expected
+    assert transition.events[0].reason == expected  # type: ignore[union-attr]
+
+
 def test_record_success_is_silent_without_failures_and_preserves_other_state() -> None:
     key = state_key("demo", "GPT Plus")
     original = make_state()

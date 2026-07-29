@@ -95,14 +95,16 @@ def _should_notify_failure(count: int) -> bool:
 
 def _sanitize_reason(reason: str) -> str:
     text = str(reason)
-    if any(core in text.casefold() for core in _SENSITIVE_REASON_CORES):
-        return _REDACTED_REASON
     text = "".join(
         " " if unicodedata.category(character).startswith("C") else character
         for character in text
     )
     text = " ".join(text.split())
     text = _URL_PATTERN.sub("<url>", text)
+    if ":" in text or "=" in text:
+        return _REDACTED_REASON
+    if any(core in text.casefold() for core in _SENSITIVE_REASON_CORES):
+        return _REDACTED_REASON
     if len(text) > _MAX_REASON_LENGTH:
         text = f"{text[: _MAX_REASON_LENGTH - 3].rstrip()}..."
     return text
