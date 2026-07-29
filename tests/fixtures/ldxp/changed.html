@@ -5,6 +5,8 @@
     <title>LDXP sanitized changed fixture</title>
   </head>
   <body>
+    <!-- Confirmed sampled pre-click DOM selectors and structure. -->
+    <!-- Any synthetic count, state, or card-to-modal behavior belongs to the Task 7 harness, not production DOM. -->
     <!-- The sampled production count was 共3种商品; this sanitized fixture uses 共1种商品 to match the one retained card. -->
     <!-- Sanitized test variant: the price differs from the sampled production card. -->
     <div class="fl_box_leng fl_box_leng_xz">
@@ -20,9 +22,14 @@
       </div>
       <span class="stock rank0">缺货</span>
     </div>
-    <div class="arco-modal confirm_order">
-      <a class="arco-modal-close-btn" target="_blank" href="/item/3xxf1n">商品详情</a>
-      <input role="spinbutton" aria-valuemax="0" aria-valuemin="1" aria-valuenow="1" class="arco-input" type="text">
-    </div>
+
+    <!-- Test-only inert storage of confirmed sampled post-click page-level modal DOM. -->
+    <!-- The Task 7 harness may activate it; production has no template. The adapter must not reference this ID. -->
+    <template id="fixture-post-click-modal">
+      <div class="arco-modal confirm_order">
+        <a class="arco-modal-close-btn" target="_blank" href="/item/3xxf1n">商品详情</a>
+        <input role="spinbutton" aria-valuemax="0" aria-valuemin="1" aria-valuenow="1" class="arco-input" type="text">
+      </div>
+    </template>
   </body>
 </html>
