@@ -15,12 +15,12 @@ APPROVED_ACTIONS: dict[str, tuple[str, str]] = {
     "actions/setup-python": ("a309ff8b426b58ec0e2a45f0f869d46889d02405", "v6.2.0"),
 }
 EXPECTED_MONITOR_JOB_ENV = {
-    "TMPDIR": "${{ runner.temp }}",
     "GIT_AUTHOR_NAME": "github-actions[bot]",
     "GIT_AUTHOR_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
     "GIT_COMMITTER_NAME": "github-actions[bot]",
     "GIT_COMMITTER_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
 }
+RUNNER_TMPDIR = "${{ runner.temp }}"
 EXPECTED_INSTALL_COMMANDS = {
     "ci.yml": (
         'python -m pip install -e ".[dev]"',
@@ -111,8 +111,8 @@ def assert_monitor_secret_contract(data: dict[str, Any], text: str) -> None:
     dry = next(
         step for step in steps if step.get("run", "").strip() == "gpt-stock-monitor --dry-run"
     )
-    assert live["env"] == {webhook_key: secret_reference}
-    assert webhook_key not in dry.get("env", {})
+    assert live.get("env") == {"TMPDIR": RUNNER_TMPDIR, webhook_key: secret_reference}
+    assert dry.get("env") == {"TMPDIR": RUNNER_TMPDIR}
 
 
 def assert_monitor_cli_contract(data: dict[str, Any]) -> None:
@@ -281,16 +281,38 @@ def test_monitor_secret_contract_rejects_scope_mutations() -> None:
             1,
         ),
         text.replace(
-            "      TMPDIR: ${{ runner.temp }}\n",
-            "      TMPDIR: ${{ runner.temp }}\n"
+            "      GIT_AUTHOR_NAME: github-actions[bot]\n",
+            "      GIT_AUTHOR_NAME: github-actions[bot]\n"
             "      FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
             1,
         ),
         text.replace(
-            "        run: gpt-stock-monitor --dry-run\n",
             "        run: gpt-stock-monitor --dry-run\n"
             "        env:\n"
+            "          TMPDIR: ${{ runner.temp }}\n",
+            "        run: gpt-stock-monitor --dry-run\n"
+            "        env:\n"
+            "          TMPDIR: ${{ runner.temp }}\n"
             "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
+            1,
+        ),
+        text.replace(
+            "    env:\n",
+            "    env:\n      TMPDIR: ${{ runner.temp }}\n",
+            1,
+        ),
+        text.replace(
+            "        env:\n"
+            "          TMPDIR: ${{ runner.temp }}\n"
+            "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
+            "        env:\n" "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
+            1,
+        ),
+        text.replace(
+            "        run: gpt-stock-monitor --dry-run\n"
+            "        env:\n"
+            "          TMPDIR: ${{ runner.temp }}\n",
+            "        run: gpt-stock-monitor --dry-run\n",
             1,
         ),
     ]

@@ -23,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      TMPDIR: ${{ runner.temp }}
       GIT_AUTHOR_NAME: github-actions[bot]
       GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
       GIT_COMMITTER_NAME: github-actions[bot]
@@ -44,7 +43,10 @@ jobs:
         if: github.event_name == 'schedule' || inputs.dry_run == false
         run: gpt-stock-monitor
         env:
+          TMPDIR: ${{ runner.temp }}
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
       - name: Run dry monitor
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
         run: gpt-stock-monitor --dry-run
+        env:
+          TMPDIR: ${{ runner.temp }}
