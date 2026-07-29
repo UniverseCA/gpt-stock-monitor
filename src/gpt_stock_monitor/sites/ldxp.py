@@ -54,6 +54,9 @@ class LdxpAdapter:
                 raise
             except (CategoryNotFoundError, SiteNavigationError, SuspiciousExtractionError) as exc:
                 last_error = exc
+            except PlaywrightError as exc:
+                last_error = SuspiciousExtractionError("site extraction lifecycle failed")
+                last_error.__cause__ = exc
         assert last_error is not None
         raise last_error
 
@@ -72,7 +75,10 @@ class LdxpAdapter:
         if navigation_error is not None:
             raise SiteNavigationError("shop navigation failed") from navigation_error
 
-        body_text = await self._page.locator("body").inner_text()
+        try:
+            body_text = await self._page.locator("body").inner_text()
+        except PlaywrightError as exc:
+            raise SiteNavigationError("shop body could not be read after navigation") from exc
         if _CHALLENGE_TEXT.search(_visible_text(body_text)):
             raise InteractiveChallengeError("shop requires interactive verification")
 
@@ -113,7 +119,7 @@ class LdxpAdapter:
         products: list[Product] = []
         product_keys: set[str] = set()
         for index in range(card_count):
-            product = await self._extract_product(cards.nth(index))
+            product = await self._extract_product(config, cards.nth(index))
             if product.key in product_keys:
                 raise SuspiciousExtractionError("duplicate canonical product id")
             product_keys.add(product.key)
@@ -225,8 +231,8 @@ class LdxpAdapter:
                 texts.append(_visible_text(await child.inner_text()))
         return texts
 
-    async def _extract_product(self, card: Locator) -> Product:
-        await self._remove_live_modals()
+    async def _extract_product(self, config: MonitorConfig, card: Locator) -> Product:
+        await self._close_live_modal(config)
         try:
             name = _visible_text(await card.locator(".name").inner_text())
             currency = _visible_text(await card.locator(".goods-price .currency").inner_text())
@@ -237,27 +243,16 @@ class LdxpAdapter:
         if not name or not currency or not _PRICE.fullmatch(price):
             raise SuspiciousExtractionError("product card contains invalid fields")
 
+        extraction_error: SiteNavigationError | SuspiciousExtractionError | None = None
+        product: Product | None = None
         try:
             await card.click(timeout=self._navigation_timeout_ms)
-            modal = self._page.locator(".arco-modal.confirm_order")
-            await modal.wait_for(state="attached", timeout=self._navigation_timeout_ms)
-            if await modal.count() != 1:
-                raise SuspiciousExtractionError("product click did not open exactly one modal")
-
-            link = modal.locator('a[href^="/item/"]')
-            if await link.count() != 1:
-                raise SuspiciousExtractionError("product modal lacks one canonical item link")
-            href = await link.get_attribute("href")
-            match = _ITEM_PATH.fullmatch(href or "")
-            if match is None:
-                raise SuspiciousExtractionError("product item link is noncanonical")
-            item_id = match.group(1)
-
+            self._validate_page_url(config)
+            item_id, modal_out_of_stock = await self._wait_for_matching_modal(config, name)
             availability = self._availability(stock_text)
-            quantity = modal.locator('input[role="spinbutton"]')
-            if await quantity.count() == 1 and await quantity.get_attribute("aria-valuemax") == "0":
+            if modal_out_of_stock:
                 availability = Availability.OUT_OF_STOCK
-            return Product(
+            product = Product(
                 key=item_id,
                 name=name,
                 price=price,
@@ -267,14 +262,91 @@ class LdxpAdapter:
                 url=f"https://pay.ldxp.cn/item/{item_id}",
             )
         except PlaywrightError as exc:
-            raise SuspiciousExtractionError("product click did not expose stable identity") from exc
-        finally:
-            await self._remove_live_modals()
+            extraction_error = SuspiciousExtractionError(
+                "product click did not expose stable identity"
+            )
+            extraction_error.__cause__ = exc
+        except (SiteNavigationError, SuspiciousExtractionError) as exc:
+            extraction_error = exc
 
-    async def _remove_live_modals(self) -> None:
+        try:
+            await self._close_live_modal(config)
+        except (SiteNavigationError, SuspiciousExtractionError):
+            if extraction_error is None:
+                raise
+        if extraction_error is not None:
+            raise extraction_error
+        assert product is not None
+        return product
+
+    async def _wait_for_matching_modal(
+        self, config: MonitorConfig, expected_name: str
+    ) -> tuple[str, bool]:
+        max_samples = max(1, self._navigation_timeout_ms // 50)
+        for _sample in range(max_samples):
+            self._validate_page_url(config)
+            modals = self._page.locator(".arco-modal.confirm_order")
+            modal_count = await modals.count()
+            if modal_count > 1:
+                raise SuspiciousExtractionError("multiple product modals are ambiguous")
+            if modal_count == 0:
+                await self._page.wait_for_timeout(50)
+                continue
+
+            modal = modals.first
+            modal_name = modal.locator(".pr_name")
+            if await modal_name.count() != 1 or not await modal_name.is_visible():
+                raise SuspiciousExtractionError("product modal lacks one visible product name")
+            actual_name = _visible_text(await modal_name.inner_text())
+            self._validate_page_url(config)
+            if actual_name != expected_name:
+                await self._close_modal(config, modal)
+                await self._page.wait_for_timeout(50)
+                continue
+
+            link = modal.locator('a[href^="/item/"]')
+            if await link.count() != 1:
+                raise SuspiciousExtractionError("product modal lacks one canonical item link")
+            href = await link.get_attribute("href")
+            match = _ITEM_PATH.fullmatch(href or "")
+            if match is None:
+                raise SuspiciousExtractionError("product item link is noncanonical")
+            quantity = modal.locator('input[role="spinbutton"]')
+            out_of_stock = (
+                await quantity.count() == 1
+                and await quantity.get_attribute("aria-valuemax") == "0"
+            )
+            self._validate_page_url(config)
+            return match.group(1), out_of_stock
+        raise SuspiciousExtractionError("no matching fresh product modal appeared")
+
+    async def _close_live_modal(self, config: MonitorConfig) -> None:
+        self._validate_page_url(config)
         modals = self._page.locator(".arco-modal.confirm_order")
-        for index in reversed(range(await modals.count())):
-            await modals.nth(index).evaluate("node => node.remove()")
+        count = await modals.count()
+        if count > 1:
+            raise SuspiciousExtractionError("multiple product modals are ambiguous")
+        if count == 1:
+            await self._close_modal(config, modals.first)
+
+    async def _close_modal(self, config: MonitorConfig, modal: Locator) -> None:
+        modal_handle = await modal.element_handle()
+        if modal_handle is None:
+            raise SuspiciousExtractionError("product modal disappeared before safe close")
+        close = modal.locator('[role="button"][aria-label="Close"]')
+        if await close.count() != 1 or not await close.is_visible():
+            raise SuspiciousExtractionError("product modal lacks one visible close control")
+        await close.click(timeout=self._navigation_timeout_ms)
+        self._validate_page_url(config)
+        try:
+            await self._page.wait_for_function(
+                "node => !node.isConnected",
+                arg=modal_handle,
+                timeout=self._navigation_timeout_ms,
+            )
+        except PlaywrightError as exc:
+            raise SuspiciousExtractionError("product modal did not close safely") from exc
+        self._validate_page_url(config)
 
     @staticmethod
     def _availability(stock_text: str) -> Availability:

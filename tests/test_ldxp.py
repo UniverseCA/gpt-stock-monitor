@@ -4,8 +4,10 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Route, async_playwright
 
 from gpt_stock_monitor.config import MonitorConfig
@@ -65,31 +67,60 @@ HARNESS = """
 ({ links }) => {
   document.addEventListener("DOMContentLoaded", () => {
     window.__fixtureClicks = [];
+    window.__fixtureCloseClicks = 0;
     window.__fixtureMaxLiveModals = 0;
+    window.__fixturePendingStale = null;
+    const openModal = (spec, card) => {
+      const modal = document.createElement("div");
+      modal.className = "arco-modal confirm_order";
+      const productName = document.createElement("div");
+      productName.className = "pr_name";
+      productName.textContent = spec.name ?? card.querySelector(".name").textContent;
+      modal.append(productName);
+      const close = document.createElement("div");
+      close.className = "arco-modal-close-btn";
+      close.setAttribute("role", "button");
+      close.setAttribute("aria-label", "Close");
+      close.setAttribute("tabindex", "-1");
+      close.textContent = "x";
+      close.addEventListener("click", () => {
+        window.__fixtureCloseClicks += 1;
+        if (!spec.closeFails) modal.remove();
+      });
+      modal.append(close);
+      if (spec.href !== null) {
+        const anchor = document.createElement("a");
+        anchor.href = spec.href;
+        anchor.textContent = "商品详情";
+        modal.append(anchor);
+      }
+      if (spec.max !== null) {
+        const input = document.createElement("input");
+        input.setAttribute("role", "spinbutton");
+        input.setAttribute("aria-valuemax", spec.max);
+        modal.append(input);
+      }
+      document.body.append(modal);
+      window.__fixtureMaxLiveModals = Math.max(
+        window.__fixtureMaxLiveModals,
+        document.querySelectorAll(".arco-modal.confirm_order").length
+      );
+    };
     document.querySelectorAll(".goods_item.has_image").forEach((card, index) => {
       card.addEventListener("click", () => {
-        document.querySelectorAll(".arco-modal.confirm_order").forEach(node => node.remove());
-        const modal = document.createElement("div");
-        modal.className = "arco-modal confirm_order";
+        if (window.__fixturePendingStale) {
+          const pending = window.__fixturePendingStale;
+          window.__fixturePendingStale = null;
+          setTimeout(() => openModal(pending.spec, pending.card), pending.spec.delay);
+        }
         const spec = links[index];
-        if (spec.href !== null) {
-          const anchor = document.createElement("a");
-          anchor.href = spec.href;
-          anchor.textContent = "商品详情";
-          modal.append(anchor);
+        if (spec.url) history.replaceState({}, "", spec.url);
+        if (spec.delay) setTimeout(() => openModal(spec, card), spec.delay);
+        else openModal(spec, card);
+        if (spec.stale) {
+          window.__fixturePendingStale = {spec: spec.stale, card};
         }
-        if (spec.max !== null) {
-          const input = document.createElement("input");
-          input.setAttribute("role", "spinbutton");
-          input.setAttribute("aria-valuemax", spec.max);
-          modal.append(input);
-        }
-        document.body.append(modal);
         window.__fixtureClicks.push(index);
-        window.__fixtureMaxLiveModals = Math.max(
-          window.__fixtureMaxLiveModals,
-          document.querySelectorAll(".arco-modal.confirm_order").length
-        );
       });
     });
   });
@@ -99,14 +130,16 @@ HARNESS = """
 
 async def _collect(
     html: str,
-    links: list[dict[str, str | None]],
+    links: list[dict[str, Any]],
     *,
     monitor: MonitorConfig | None = None,
     inspect_page: bool = False,
     navigation_requests: list[str] | None = None,
     abort_shop_navigation: bool = False,
     extra_init_script: str = "",
+    close_page_after_ms: int | None = None,
 ) -> tuple[Any, dict[str, Any]]:
+    background_tasks: set[asyncio.Task[None]] = set()
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         page = await browser.new_page()
@@ -129,6 +162,14 @@ async def _collect(
                 await route.abort()
 
         await page.route("**/*", route_request)
+        if close_page_after_ms is not None:
+            async def close_page_later() -> None:
+                await page.wait_for_timeout(close_page_after_ms)
+                await page.close()
+
+            close_task = asyncio.create_task(close_page_later())
+            background_tasks.add(close_task)
+            close_task.add_done_callback(background_tasks.discard)
         if inspect_page:
             await page.goto(SHOP_URL, wait_until="domcontentloaded")
             assert await page.locator("a[href^='/item/']").count() == 0
@@ -140,6 +181,7 @@ async def _collect(
         harness_state = await page.evaluate(
             """() => ({
               clicks: window.__fixtureClicks,
+              closeClicks: window.__fixtureCloseClicks,
               maxLiveModals: window.__fixtureMaxLiveModals,
               liveModals: document.querySelectorAll('.arco-modal.confirm_order').length
             })"""
@@ -150,13 +192,14 @@ async def _collect(
 
 def collect(
     html: str,
-    links: list[dict[str, str | None]],
+    links: list[dict[str, Any]],
     *,
     monitor: MonitorConfig | None = None,
     inspect_page: bool = False,
     navigation_requests: list[str] | None = None,
     abort_shop_navigation: bool = False,
     extra_init_script: str = "",
+    close_page_after_ms: int | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     return asyncio.run(
         _collect(
@@ -167,6 +210,7 @@ def collect(
             navigation_requests=navigation_requests,
             abort_shop_navigation=abort_shop_navigation,
             extra_init_script=extra_init_script,
+            close_page_after_ms=close_page_after_ms,
         )
     )
 
@@ -187,7 +231,9 @@ def test_collects_sampled_card_details_from_post_click_canonical_link() -> None:
     assert product.availability is Availability.LOW_STOCK
     assert product.stock_text == "库存少量"
     assert observations[CATEGORY].explicit_count is None
-    assert state == {"clicks": [0], "maxLiveModals": 1, "liveModals": 0}
+    assert state["clicks"] == [0]
+    assert state["maxLiveModals"] == 1
+    assert state["liveModals"] == 0
 
 
 def test_two_cards_require_clicks_and_yield_distinct_stable_ids() -> None:
@@ -203,7 +249,101 @@ def test_two_cards_require_clicks_and_yield_distinct_stable_ids() -> None:
     )
 
     assert [product.key for product in observations[CATEGORY].products] == ["item-a", "item-b"]
-    assert state == {"clicks": [0, 1], "maxLiveModals": 1, "liveModals": 0}
+    assert state["clicks"] == [0, 1]
+    assert state["maxLiveModals"] == 1
+    assert state["liveModals"] == 0
+
+
+def test_product_modals_are_closed_through_confirmed_control_before_next_card() -> None:
+    observations, state = collect(
+        shop_html([("Product A", "10", "有货"), ("Product B", "20", "有货")]),
+        [
+            {"href": "/item/item-a", "max": None},
+            {"href": "/item/item-b", "max": None},
+        ],
+    )
+
+    assert [product.key for product in observations[CATEGORY].products] == ["item-a", "item-b"]
+    assert state["closeClicks"] == 2
+    assert state["maxLiveModals"] == 1
+    assert state["liveModals"] == 0
+
+
+def test_ignores_delayed_mismatched_stale_modal_and_waits_for_clicked_card() -> None:
+    observations, state = collect(
+        shop_html([("Product A", "10", "有货"), ("Product B", "20", "有货")]),
+        [
+            {
+                "href": "/item/item-a",
+                "max": None,
+                "stale": {
+                    "href": "/item/stale-x",
+                    "max": None,
+                    "name": "Product A",
+                    "delay": 100,
+                },
+            },
+            {"href": "/item/item-b", "max": None, "delay": 1000},
+        ],
+    )
+
+    assert [product.key for product in observations[CATEGORY].products] == ["item-a", "item-b"]
+    assert state["closeClicks"] == 3
+    assert state["maxLiveModals"] == 1
+
+
+def test_rejects_url_change_caused_by_product_click() -> None:
+    with pytest.raises(SiteNavigationError):
+        collect(
+            shop_html([("Product", "10", "有货")]),
+            [{"href": "/item/item-1", "max": None, "url": "/shop/OTHER"}],
+        )
+
+
+def test_successful_extraction_fails_if_modal_cannot_be_closed() -> None:
+    with pytest.raises(SuspiciousExtractionError):
+        collect(
+            shop_html([("Product", "10", "有货")]),
+            [{"href": "/item/item-1", "max": None, "closeFails": True}],
+        )
+
+
+def test_cleanup_failure_does_not_mask_existing_extraction_error() -> None:
+    with pytest.raises(SuspiciousExtractionError, match="lacks one canonical item link"):
+        collect(
+            shop_html([("Product", "10", "有货")]),
+            [{"href": None, "max": None, "closeFails": True}],
+        )
+
+
+def test_playwright_page_lifecycle_error_never_escapes_collect() -> None:
+    with pytest.raises((SiteNavigationError, SuspiciousExtractionError)):
+        collect(
+            shop_html([("Product", "10", "有货")]),
+            [{"href": "/item/item-1", "max": None}],
+            close_page_after_ms=20,
+        )
+
+
+def test_body_playwright_error_is_mapped_to_site_navigation_error() -> None:
+    async def exercise() -> None:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+
+            async def route_request(route: Route) -> None:
+                await route.fulfill(
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                    body=shop_html([]),
+                )
+
+            await page.route("**/*", route_request)
+            with patch.object(page, "locator", side_effect=PlaywrightError("body unavailable")):
+                await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(config())
+
+    with pytest.raises(SiteNavigationError):
+        asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(
