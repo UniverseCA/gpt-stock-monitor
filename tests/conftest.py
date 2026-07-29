@@ -15,6 +15,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "allow_network: allow this test to open network sockets",
     )
+    config.addinivalue_line(
+        "markers",
+        "allow_socketpair: allow only stdlib socketpair local IPC for this test",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -26,11 +30,18 @@ def block_public_network(
         return
 
     original_connect = socket.socket.connect
+    original_socketpair = socket.socketpair
+    socketpair_code = getattr(original_socketpair, "__code__", None)
+    allow_socketpair = request.node.get_closest_marker("allow_socketpair") is not None
 
     def guarded_connect(sock: socket.socket, address: object) -> object:
         caller = sys._getframe(1)
-        if caller.f_code is socket.socketpair.__code__:
+        if allow_socketpair and caller.f_code is socketpair_code:
             return original_connect(sock, address)  # type: ignore[arg-type]
+        raise AssertionError("network access is disabled in tests")
+
+    def blocked_socketpair(*args: object, **kwargs: object) -> None:
+        del args, kwargs
         raise AssertionError("network access is disabled in tests")
 
     def blocked_connect_ex(sock: socket.socket, address: object) -> int:
@@ -44,3 +55,5 @@ def block_public_network(
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", blocked_connect_ex)
     monkeypatch.setattr(socket, "create_connection", blocked_create_connection)
+    if not allow_socketpair:
+        monkeypatch.setattr(socket, "socketpair", blocked_socketpair)

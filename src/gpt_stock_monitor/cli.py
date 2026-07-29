@@ -15,6 +15,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from playwright.async_api import async_playwright
@@ -103,6 +104,19 @@ def _parser() -> argparse.ArgumentParser:
 def _redact(text: str, webhook_url: str | None) -> str:
     if webhook_url:
         text = text.replace(webhook_url, "[REDACTED]")
+        try:
+            path_segments = [
+                segment for segment in urlsplit(webhook_url).path.split("/") if segment
+            ]
+        except ValueError:
+            path_segments = []
+        token = (
+            path_segments[-1]
+            if len(path_segments) >= 2 and path_segments[-2] == "hook"
+            else ""
+        )
+        if token:
+            text = text.replace(token, "[REDACTED]")
     return _FEISHU_WEBHOOK.sub("[REDACTED]", text)
 
 

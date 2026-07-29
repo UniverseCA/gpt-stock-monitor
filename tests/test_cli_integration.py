@@ -7,6 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 
 import httpx
+import pytest
 from playwright.async_api import Route, async_playwright
 
 from gpt_stock_monitor.cli import RuntimeServices, main
@@ -99,6 +100,7 @@ class FileStateRepository:
         return PublishResult(PublishStatus.PUBLISHED, version)
 
 
+@pytest.mark.allow_socketpair
 def test_real_cli_pipeline_and_dry_run_preserve_pending_state(
     tmp_path: Path,
     monkeypatch,

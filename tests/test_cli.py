@@ -36,6 +36,7 @@ async def services_factory(webhook_url: str | None) -> AsyncIterator[RuntimeServ
     yield RuntimeServices(object(), object(), object())
 
 
+@pytest.mark.allow_socketpair
 def test_default_config_path_and_utf8_deterministic_output(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -60,6 +61,7 @@ def test_default_config_path_and_utf8_deterministic_output(
     assert captured.err == ""
 
 
+@pytest.mark.allow_socketpair
 def test_config_override_and_dry_run_do_not_read_or_pass_webhook(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -167,6 +169,7 @@ def test_unreadable_config_returns_safe_configuration_error(
 
 
 @pytest.mark.parametrize("result_code", [0, 3])
+@pytest.mark.allow_socketpair
 def test_returns_run_result_exit_code_and_prints_output(
     result_code: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -190,6 +193,7 @@ def test_returns_run_result_exit_code_and_prints_output(
     assert captured.err == ""
 
 
+@pytest.mark.allow_socketpair
 def test_non_json_output_returns_three_with_redacted_traceback(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -213,6 +217,7 @@ def test_non_json_output_returns_three_with_redacted_traceback(
     assert webhook not in captured.err
 
 
+@pytest.mark.allow_socketpair
 def test_stdout_json_redacts_webhook(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -235,6 +240,7 @@ def test_stdout_json_redacts_webhook(
     assert captured.err == ""
 
 
+@pytest.mark.allow_socketpair
 def test_stdout_json_is_written_as_explicit_utf8_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -261,6 +267,7 @@ def test_stdout_json_is_written_as_explicit_utf8_bytes(
     assert output.buffer.getvalue() != '{"name":"中文"}\n'.encode("gbk")
 
 
+@pytest.mark.allow_socketpair
 def test_stdout_write_failure_is_an_unknown_redacted_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -294,6 +301,7 @@ def test_stdout_write_failure_is_an_unknown_redacted_error(
     assert "[REDACTED]" in captured.err
 
 
+@pytest.mark.allow_socketpair
 def test_defined_application_exception_returns_three(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -311,6 +319,7 @@ def test_defined_application_exception_returns_three(
     assert captured.err == "monitor run failed\n"
 
 
+@pytest.mark.allow_socketpair
 def test_unknown_exception_traceback_is_redacted(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -334,6 +343,32 @@ def test_unknown_exception_traceback_is_redacted(
     assert "[REDACTED]" in captured.err
 
 
+@pytest.mark.allow_socketpair
+def test_token_only_unknown_exception_traceback_is_redacted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = "token-only-secret"
+    webhook = f"https://open.feishu.cn/open-apis/bot/v2/hook/{token}"
+    monkeypatch.setenv("FEISHU_WEBHOOK_URL", webhook)
+    monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
+
+    @asynccontextmanager
+    async def failing_factory(webhook_url: str | None) -> AsyncIterator[RuntimeServices]:
+        assert webhook_url is not None
+        raise RuntimeError(f"unexpected token {webhook_url.rsplit('/', 1)[-1]}")
+        yield
+
+    assert main([], services_factory=failing_factory) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback (most recent call last):" in captured.err
+    assert "RuntimeError" in captured.err
+    assert webhook not in captured.err
+    assert token not in captured.err
+    assert "[REDACTED]" in captured.err
+
+
+@pytest.mark.allow_socketpair
 def test_main_does_not_catch_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
 
@@ -348,6 +383,22 @@ def test_main_does_not_catch_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_unmarked_connect_ex_is_blocked() -> None:
+    with socket.socket() as connection:
+        with pytest.raises(AssertionError, match="network access is disabled in tests"):
+            connection.connect_ex(("127.0.0.1", 9))
+
+
+def test_unmarked_socketpair_is_blocked() -> None:
+    with pytest.raises(AssertionError, match="network access is disabled in tests"):
+        socket.socketpair()
+
+
+@pytest.mark.allow_socketpair
+def test_marked_socketpair_only_permits_local_ipc() -> None:
+    left, right = socket.socketpair()
+    left.close()
+    right.close()
+
     with socket.socket() as connection:
         with pytest.raises(AssertionError, match="network access is disabled in tests"):
             connection.connect_ex(("127.0.0.1", 9))
