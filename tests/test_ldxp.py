@@ -372,6 +372,67 @@ def test_waits_for_requested_category_to_be_visibly_selected() -> None:
     assert observations[CATEGORY].products[0].name == "Target product"
 
 
+def test_waits_for_same_count_product_semantics_after_category_is_selected() -> None:
+    split_switch = """
+    document.addEventListener("DOMContentLoaded", () => {
+      document.querySelector("#target-category").addEventListener("click", () => {
+        setTimeout(() => {
+          document.querySelector("#old-category").classList.remove("fl_box_leng_xz");
+          document.querySelector("#target-category").classList.add("fl_box_leng_xz");
+        }, 50);
+        setTimeout(() => {
+          document.querySelector(".goods_item.has_image .name").textContent = "Target product";
+          document.querySelector(".goods_item.has_image .nowPrice").textContent = "20";
+          document.querySelector(".goods_item.has_image .stock").textContent = "缺货";
+        }, 500);
+      });
+    });
+    """
+
+    observations, _ = collect(
+        delayed_category_html(),
+        [{"href": "/item/target-id", "max": None}],
+        extra_init_script=split_switch,
+    )
+
+    product = observations[CATEGORY].products[0]
+    assert product.name == "Target product"
+    assert product.price == "20"
+    assert product.stock_text == "缺货"
+    assert product.availability is Availability.OUT_OF_STOCK
+
+
+def test_never_accepts_pre_click_fingerprint_after_a_brief_transition() -> None:
+    reverting_switch = """
+    document.addEventListener("DOMContentLoaded", () => {
+      document.querySelector("#target-category").addEventListener("click", () => {
+        setTimeout(() => {
+          document.querySelector("#old-category").classList.remove("fl_box_leng_xz");
+          document.querySelector("#target-category").classList.add("fl_box_leng_xz");
+        }, 50);
+        setTimeout(() => {
+          let tick = 0;
+          const changing = setInterval(() => {
+            tick += 1;
+            document.querySelector(".goods_item.has_image .name").textContent = `Transient ${tick}`;
+          }, 10);
+          setTimeout(() => {
+            clearInterval(changing);
+            document.querySelector(".goods_item.has_image .name").textContent = "Stale product";
+          }, 500);
+        }, 100);
+      });
+    });
+    """
+
+    with pytest.raises(SuspiciousExtractionError):
+        collect(
+            delayed_category_html(),
+            [{"href": "/item/target-id", "max": None}],
+            extra_init_script=reverting_switch,
+        )
+
+
 def test_rejects_unsafe_url_reached_during_delayed_category_switch() -> None:
     unsafe_switch = """
     document.addEventListener("DOMContentLoaded", () => {

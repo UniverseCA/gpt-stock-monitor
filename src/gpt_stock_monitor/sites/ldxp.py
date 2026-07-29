@@ -22,6 +22,7 @@ _COUNT = re.compile(r"^共\s*(\d+)\s*种商品$")
 _ITEM_PATH = re.compile(r"^/item/([A-Za-z0-9_-]+)$")
 _PRICE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d+)?$")
 _CHALLENGE_TEXT = re.compile(r"安全验证|人机验证")
+_ProductFingerprint = tuple[tuple[str, str, str, str], ...]
 
 
 def _visible_text(value: str) -> str:
@@ -85,7 +86,11 @@ class LdxpAdapter:
         self, config: MonitorConfig, requested_category: str
     ) -> CategoryObservation:
         category = await self._find_category(requested_category)
+        previous_fingerprint: _ProductFingerprint | None = None
         if not await self._is_selected(category):
+            previous_fingerprint = await self._product_area_fingerprint()
+            if previous_fingerprint is None:
+                raise SuspiciousExtractionError("product area cannot be fingerprinted safely")
             await category.click(timeout=self._navigation_timeout_ms)
             self._validate_page_url(config)
             await self._wait_for_selected(config, category)
@@ -93,7 +98,9 @@ class LdxpAdapter:
             self._validate_page_url(config)
 
         explicit_count = await self._category_count(category)
-        await self._wait_for_product_area_stability(explicit_count)
+        await self._wait_for_product_area_stability(
+            config, explicit_count, previous_fingerprint
+        )
         self._validate_page_url(config)
 
         cards = self._page.locator(".goods_item.has_image")
@@ -145,20 +152,58 @@ class LdxpAdapter:
             "node => node.classList.contains('fl_box_leng_xz')"
         )
 
-    async def _wait_for_product_area_stability(self, expected_count: int) -> None:
-        cards = self._page.locator(".goods_item.has_image")
+    async def _wait_for_product_area_stability(
+        self,
+        config: MonitorConfig,
+        expected_count: int,
+        previous_fingerprint: _ProductFingerprint | None,
+    ) -> None:
+        stable_fingerprint: _ProductFingerprint | None = None
         stable_samples = 0
         max_samples = max(3, self._navigation_timeout_ms // 50)
         for _sample in range(max_samples):
-            count = await cards.count()
-            if count == expected_count:
-                stable_samples += 1
+            self._validate_page_url(config)
+            fingerprint = await self._product_area_fingerprint()
+            if fingerprint is None or len(fingerprint) != expected_count:
+                stable_samples = 0
+                stable_fingerprint = None
+            elif previous_fingerprint is not None and fingerprint == previous_fingerprint:
+                stable_samples = 0
+                stable_fingerprint = None
+            else:
+                if fingerprint == stable_fingerprint:
+                    stable_samples += 1
+                else:
+                    stable_fingerprint = fingerprint
+                    stable_samples = 1
                 if stable_samples == 2:
                     return
-            else:
-                stable_samples = 0
             await self._page.wait_for_timeout(50)
         raise SuspiciousExtractionError("product area did not become stable")
+
+    async def _product_area_fingerprint(self) -> _ProductFingerprint | None:
+        visible_cards: list[tuple[str, str, str, str]] = []
+        cards = self._page.locator(".goods_item.has_image")
+        try:
+            for index in range(await cards.count()):
+                card = cards.nth(index)
+                if not await card.is_visible():
+                    continue
+                fields = []
+                for selector in (
+                    ".name",
+                    ".goods-price .currency",
+                    ".goods-price .nowPrice",
+                    ".stock",
+                ):
+                    field = card.locator(selector)
+                    if await field.count() != 1 or not await field.is_visible():
+                        return None
+                    fields.append(_visible_text(await field.inner_text()))
+                visible_cards.append((fields[0], fields[1], fields[2], fields[3]))
+        except PlaywrightError:
+            return None
+        return tuple(sorted(visible_cards))
 
     async def _category_count(self, category: Locator) -> int:
         count_values = []
