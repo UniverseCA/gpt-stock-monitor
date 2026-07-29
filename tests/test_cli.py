@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from io import BytesIO
 from pathlib import Path
 from typing import Never
 
@@ -126,6 +128,44 @@ def test_config_error_returns_two_without_exposing_config_content(
     assert secret not in captured.err
 
 
+def test_missing_config_returns_safe_configuration_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret_path = tmp_path / "secret-config-name.yaml"
+
+    assert (
+        main(
+            ["--config", str(secret_path), "--dry-run"],
+            services_factory=services_factory,
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "configuration error: configuration file could not be read\n"
+    assert str(secret_path) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_unreadable_config_returns_safe_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "permission-secret-path"
+
+    def fail(path: Path) -> Never:
+        del path
+        raise PermissionError(secret)
+
+    monkeypatch.setattr("gpt_stock_monitor.cli.load_config", fail)
+
+    assert main(["--dry-run"], services_factory=services_factory) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "configuration error: configuration file could not be read\n"
+    assert secret not in captured.err
+    assert "Traceback" not in captured.err
+
+
 @pytest.mark.parametrize("result_code", [0, 3])
 def test_returns_run_result_exit_code_and_prints_output(
     result_code: int,
@@ -148,6 +188,110 @@ def test_returns_run_result_exit_code_and_prints_output(
         separators=(",", ":"),
     ) + "\n"
     assert captured.err == ""
+
+
+def test_non_json_output_returns_three_with_redacted_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "non-json-secret"
+    webhook = f"https://open.feishu.cn/open-apis/bot/v2/hook/{secret}"
+    monkeypatch.setenv("FEISHU_WEBHOOK_URL", webhook)
+    monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
+
+    async def fake_run_once(*args: object, **kwargs: object) -> RunResult:
+        del args, kwargs
+        return RunResult(0, {"bad": object(), "webhook": webhook})
+
+    monkeypatch.setattr("gpt_stock_monitor.cli.run_once", fake_run_once)
+
+    assert main([], services_factory=services_factory) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback (most recent call last):" in captured.err
+    assert "TypeError" in captured.err
+    assert secret not in captured.err
+    assert webhook not in captured.err
+
+
+def test_stdout_json_redacts_webhook(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "stdout-secret"
+    webhook = f"https://open.feishu.cn/open-apis/bot/v2/hook/{secret}"
+    monkeypatch.setenv("FEISHU_WEBHOOK_URL", webhook)
+    monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
+
+    async def fake_run_once(*args: object, **kwargs: object) -> RunResult:
+        del args, kwargs
+        return RunResult(0, {"diagnostic": webhook})
+
+    monkeypatch.setattr("gpt_stock_monitor.cli.run_once", fake_run_once)
+
+    assert main([], services_factory=services_factory) == 0
+    captured = capsys.readouterr()
+    assert captured.out == '{"diagnostic":"[REDACTED]"}\n'
+    assert secret not in captured.out
+    assert webhook not in captured.out
+    assert captured.err == ""
+
+
+def test_stdout_json_is_written_as_explicit_utf8_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GbkTextStream:
+        def __init__(self) -> None:
+            self.buffer = BytesIO()
+
+        def write(self, value: str) -> int:
+            self.buffer.write(value.encode("gbk"))
+            return len(value)
+
+    output = GbkTextStream()
+    monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
+    monkeypatch.setattr("gpt_stock_monitor.cli.sys.stdout", output)
+
+    async def fake_run_once(*args: object, **kwargs: object) -> RunResult:
+        del args, kwargs
+        return RunResult(0, {"name": "中文"})
+
+    monkeypatch.setattr("gpt_stock_monitor.cli.run_once", fake_run_once)
+
+    assert main(["--dry-run"], services_factory=services_factory) == 0
+    assert output.buffer.getvalue() == '{"name":"中文"}\n'.encode()
+    assert output.buffer.getvalue() != '{"name":"中文"}\n'.encode("gbk")
+
+
+def test_stdout_write_failure_is_an_unknown_redacted_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "stdout-write-secret"
+    webhook = f"https://open.feishu.cn/open-apis/bot/v2/hook/{secret}"
+
+    class FailingBuffer:
+        def write(self, value: bytes) -> Never:
+            del value
+            raise OSError(webhook)
+
+    class FailingStdout:
+        buffer = FailingBuffer()
+
+    monkeypatch.setenv("FEISHU_WEBHOOK_URL", webhook)
+    monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
+    monkeypatch.setattr("gpt_stock_monitor.cli.sys.stdout", FailingStdout())
+
+    async def fake_run_once(*args: object, **kwargs: object) -> RunResult:
+        del args, kwargs
+        return RunResult(0, {"ok": True})
+
+    monkeypatch.setattr("gpt_stock_monitor.cli.run_once", fake_run_once)
+
+    assert main([], services_factory=services_factory) == 3
+    captured = capsys.readouterr()
+    assert "Traceback (most recent call last):" in captured.err
+    assert "OSError" in captured.err
+    assert webhook not in captured.err
+    assert secret not in captured.err
+    assert "[REDACTED]" in captured.err
 
 
 def test_defined_application_exception_returns_three(
@@ -201,3 +345,9 @@ def test_main_does_not_catch_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(KeyboardInterrupt):
         main(["--dry-run"], services_factory=interrupted_factory)
+
+
+def test_unmarked_connect_ex_is_blocked() -> None:
+    with socket.socket() as connection:
+        with pytest.raises(AssertionError, match="network access is disabled in tests"):
+            connection.connect_ex(("127.0.0.1", 9))

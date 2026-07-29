@@ -25,6 +25,15 @@ from gpt_stock_monitor.state import (
 SHOP_URL = "https://pay.ldxp.cn/shop/NIFGEAC5"
 CATEGORY = "GPT 商品"
 WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/test-only"
+PADDING = "x" * 3_200
+ALPHA = f"Alpha {PADDING} A"
+BETA = f"Beta {PADDING} B"
+OLD_CHARLIE = f"Old Charlie {PADDING} C"
+NEW_CHARLIE = f"New Charlie {PADDING} C"
+DELTA = f"Delta {PADDING} D"
+ECHO = f"Echo {PADDING} E"
+FOXTROT = f"Foxtrot {PADDING} F"
+GOLF = f"Golf {PADDING} G"
 
 MODAL_SCRIPT = """
 document.addEventListener("DOMContentLoaded", () => {
@@ -111,22 +120,22 @@ def test_real_cli_pipeline_and_dry_run_preserve_pending_state(
     repository = FileStateRepository(state_path)
     baseline = shop_html(
         [
-            ("A", "Alpha", "10", "缺货", "0"),
-            ("B", "Beta", "20", "有货", "5"),
-            ("C", "Old Charlie", "30", "有货", "5"),
-            ("D", "Delta", "40", "有货", "5"),
-            ("E", "Echo", "50", "有货", "5"),
-            ("F", "Foxtrot", "60", "有货", "5"),
+            ("A", ALPHA, "10", "缺货", "0"),
+            ("B", BETA, "20", "有货", "5"),
+            ("C", OLD_CHARLIE, "30", "有货", "5"),
+            ("D", DELTA, "40", "有货", "5"),
+            ("E", ECHO, "50", "有货", "5"),
+            ("F", FOXTROT, "60", "有货", "5"),
         ]
     )
     changed = shop_html(
         [
-            ("A", "Alpha", "10", "有货", "5"),
-            ("B", "Beta", "20", "缺货", "0"),
-            ("C", "New Charlie", "30", "有货", "5"),
-            ("D", "Delta", "41", "有货", "5"),
-            ("F", "Foxtrot", "60", "有货", "5"),
-            ("G", "Golf", "70", "有货", "5"),
+            ("A", ALPHA, "10", "有货", "5"),
+            ("B", BETA, "20", "缺货", "0"),
+            ("C", NEW_CHARLIE, "30", "有货", "5"),
+            ("D", DELTA, "41", "有货", "5"),
+            ("F", FOXTROT, "60", "有货", "5"),
+            ("G", GOLF, "70", "有货", "5"),
         ]
     )
     pages = iter((baseline, changed, changed))
@@ -175,21 +184,69 @@ def test_real_cli_pipeline_and_dry_run_preserve_pending_state(
     assert main(["--config", str(config_path)], services_factory=factory) == 0
     second_stdout = capsys.readouterr().out
     second_output = json.loads(second_stdout)
-    change_kinds = {change["kind"] for change in second_output["changes"]}
-    assert {"added", "removed", "availability", "name", "price"} <= change_kinds
-    combined_notification = "\n".join(
-        request["content"]["text"] for request in requests  # type: ignore[index]
+    assert len(requests) == 2
+    exact_changes = {
+        (
+            change["kind"],
+            change["product_key"],
+            change["before"],
+            change["after"],
+        )
+        for change in second_output["changes"]
+    }
+    assert exact_changes == {
+        ("added", "G", None, None),
+        ("removed", "E", None, None),
+        ("availability", "A", "out_of_stock", "in_stock"),
+        ("availability", "B", "in_stock", "out_of_stock"),
+        ("name", "C", OLD_CHARLIE, NEW_CHARLIE),
+        ("price", "D", "40", "41"),
+    }
+
+    payload_texts = []
+    total_parts = len(requests)
+    for part_number, request in enumerate(requests, start=1):
+        serialized_request = json.dumps(
+            request,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        assert len(serialized_request.encode()) <= 18_000
+        content = request["content"]
+        assert isinstance(content, dict)
+        text = content["text"]
+        assert isinstance(text, str)
+        assert f"Part: {part_number}/{total_parts}" in text
+        payload_texts.append(text)
+
+    combined_notification = "\n".join(payload_texts)
+    expected_payload_fragments = (
+        GOLF,
+        "https://pay.ldxp.cn/item/G",
+        ECHO,
+        "https://pay.ldxp.cn/item/E",
+        ALPHA,
+        "out_of_stock → in_stock",
+        "https://pay.ldxp.cn/item/A",
+        BETA,
+        "in_stock → out_of_stock",
+        "https://pay.ldxp.cn/item/B",
+        OLD_CHARLIE,
+        NEW_CHARLIE,
+        "https://pay.ldxp.cn/item/C",
+        DELTA,
+        "40 → 41",
+        "https://pay.ldxp.cn/item/D",
     )
-    for expected in (
-        "Alpha",
-        "Beta",
-        "New Charlie",
-        "Delta",
-        "Echo",
-        "Golf",
-    ):
-        assert expected in second_stdout
+    for expected in expected_payload_fragments:
         assert expected in combined_notification
+
+    assert WEBHOOK not in second_stdout
+    assert "test-only" not in second_stdout
+    for request in requests:
+        serialized_request = json.dumps(request, ensure_ascii=False)
+        assert WEBHOOK not in serialized_request
+        assert "test-only" not in serialized_request
 
     state = load_state(state_path)
     payload = state.model_dump(mode="json")

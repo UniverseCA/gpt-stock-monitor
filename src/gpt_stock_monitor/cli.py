@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 from playwright.async_api import async_playwright
 
-from gpt_stock_monitor.config import ConfigError, load_config
+from gpt_stock_monitor.config import AppConfig, ConfigError, load_config
 from gpt_stock_monitor.monitor import Notifier, run_once
 from gpt_stock_monitor.notifiers.feishu import FeishuError, FeishuNotifier
 from gpt_stock_monitor.sites.base import (
@@ -106,14 +106,21 @@ def _redact(text: str, webhook_url: str | None) -> str:
     return _FEISHU_WEBHOOK.sub("[REDACTED]", text)
 
 
+def _write_stdout_utf8(text: str) -> None:
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(text.encode("utf-8"))
+        return
+    sys.stdout.write(text)
+
+
 async def _run(
-    config_path: Path,
+    config: AppConfig,
     *,
     dry_run: bool,
     webhook_url: str | None,
     services_factory: ServicesFactory,
 ) -> tuple[int, dict[str, object]]:
-    config = load_config(config_path)
     async with services_factory(webhook_url) as services:
         result = await run_once(
             config,
@@ -138,17 +145,30 @@ def main(
         return 2
 
     try:
+        try:
+            config = load_config(arguments.config)
+        except ConfigError:
+            sys.stderr.write("configuration error: invalid configuration\n")
+            return 2
+        except OSError:
+            sys.stderr.write("configuration error: configuration file could not be read\n")
+            return 2
+
         exit_code, output = asyncio.run(
             _run(
-                arguments.config,
+                config,
                 dry_run=arguments.dry_run,
                 webhook_url=webhook_url,
                 services_factory=services_factory,
             )
         )
-    except ConfigError:
-        sys.stderr.write("configuration error: invalid configuration\n")
-        return 2
+        serialized = json.dumps(
+            output,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        _write_stdout_utf8(f"{_redact(serialized, webhook_url)}\n")
     except _RUN_ERRORS:
         sys.stderr.write("monitor run failed\n")
         return 3
@@ -157,13 +177,6 @@ def main(
         sys.stderr.write(diagnostic)
         return 3
 
-    serialized = json.dumps(
-        output,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    sys.stdout.write(f"{serialized}\n")
     return exit_code
 
 
