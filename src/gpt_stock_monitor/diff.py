@@ -29,7 +29,10 @@ def _normalize_stock_text(value: str) -> str:
 
 
 def _normalize_price(value: str) -> str:
-    return format(Decimal(value).normalize(), "f")
+    formatted = format(Decimal(value), "f")
+    if "." not in formatted:
+        return formatted
+    return formatted.rstrip("0").rstrip(".")
 
 
 def _field_change(
@@ -108,10 +111,16 @@ def compare_snapshots(previous: Snapshot, current: Snapshot) -> tuple[Change, ..
                     )
                 )
 
-        old_price = _normalize_price(old.price)
-        new_price = _normalize_price(new.price)
-        if old_price != new_price:
-            changes.append(_field_change(ChangeKind.PRICE, old, new, old_price, new_price))
+        if Decimal(old.price) != Decimal(new.price):
+            changes.append(
+                _field_change(
+                    ChangeKind.PRICE,
+                    old,
+                    new,
+                    _normalize_price(old.price),
+                    _normalize_price(new.price),
+                )
+            )
 
         old_name = _normalize_name(old.name)
         new_name = _normalize_name(new.name)

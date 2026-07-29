@@ -186,6 +186,32 @@ def test_compare_snapshots_ignores_format_only_differences(
     )
 
 
+def test_compare_snapshots_preserves_distinct_long_prices() -> None:
+    previous_price = "12345678901234567890123456780"
+    current_price = "12345678901234567890123456781"
+
+    assert compare_snapshots(
+        make_snapshot(make_product(price=previous_price)),
+        make_snapshot(make_product(price=current_price)),
+    ) == (
+        expected_change(
+            ChangeKind.PRICE,
+            before=previous_price,
+            after=current_price,
+        ),
+    )
+
+
+def test_compare_snapshots_ignores_long_price_decimal_trailing_zeroes() -> None:
+    assert (
+        compare_snapshots(
+            make_snapshot(make_product(price="12345678901234567890123456780.0000")),
+            make_snapshot(make_product(price="12345678901234567890123456780.0")),
+        )
+        == ()
+    )
+
+
 def test_compare_snapshots_ignores_page_product_order() -> None:
     alpha = make_product("alpha", name="Alpha")
     beta = make_product("beta", name="Beta")
