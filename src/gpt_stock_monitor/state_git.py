@@ -14,6 +14,7 @@ from gpt_stock_monitor.state import (
     PublishResult,
     PublishStatus,
     StateRepository,
+    StateRepositoryError,
     VersionedState,
     load_state,
     write_state_atomic,
@@ -27,7 +28,7 @@ _BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 _SAFE_GIT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-class StateGitError(RuntimeError):
+class StateGitError(StateRepositoryError):
     """A Git operation for monitor state failed without exposing Git output."""
 
 

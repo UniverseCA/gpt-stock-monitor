@@ -23,12 +23,14 @@ from gpt_stock_monitor.state import (
     PublishStatus,
     StateError,
     StateRepository,
+    StateRepositoryError,
     VersionedState,
     load_state,
     prune_unconfigured,
     serialize_state,
     write_state_atomic,
 )
+from gpt_stock_monitor.state_git import StateGitError
 
 
 def make_snapshot(monitor_id: str, category: str, product_key: str) -> Snapshot:
@@ -289,3 +291,8 @@ def test_repository_value_types_have_fixed_protocol_contract() -> None:
         versioned.version = "new"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         result.remote_version = None  # type: ignore[misc]
+
+
+def test_git_repository_error_uses_the_public_repository_error_boundary() -> None:
+    assert issubclass(StateRepositoryError, RuntimeError)
+    assert issubclass(StateGitError, StateRepositoryError)

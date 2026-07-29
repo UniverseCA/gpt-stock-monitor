@@ -20,6 +20,7 @@ __all__ = [
     "PublishStatus",
     "StateError",
     "StateRepository",
+    "StateRepositoryError",
     "VersionedState",
     "load_state",
     "prune_unconfigured",
@@ -128,6 +129,10 @@ class PublishResult:
 
     status: PublishStatus
     remote_version: str | None
+
+
+class StateRepositoryError(RuntimeError):
+    pass
 
 
 class StateRepository(Protocol):
