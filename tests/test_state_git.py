@@ -72,10 +72,46 @@ def test_repository_rejects_unsafe_remote_names(tmp_path: Path, remote: str) -> 
         GitStateRepository(tmp_path, tmp_path / "worktrees", remote=remote)
 
 
-@pytest.mark.parametrize("branch", ["--all", "-f", "..", ".", "", "heads/state"])
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "--all",
+        "-f",
+        "..",
+        ".",
+        "",
+        "a..b",
+        "state.lock",
+        "state.",
+        "@",
+        "state@{value",
+        "state\\name",
+        "state name",
+        "state\x01name",
+        "state~name",
+        "state^name",
+        "state:name",
+        "state?name",
+        "state*name",
+        "state[name",
+        "/state",
+        "state/",
+        "state//name",
+        ".state",
+        "group/.state",
+        "group/state.lock",
+    ],
+)
 def test_repository_rejects_unsafe_branch_names(tmp_path: Path, branch: str) -> None:
     with pytest.raises(ValueError, match=r"^invalid state git name$"):
         GitStateRepository(tmp_path, tmp_path / "worktrees", branch=branch)
+
+
+@pytest.mark.parametrize("branch", ["monitor-state", "refs-like/name_1.2"])
+def test_repository_accepts_safe_short_branch_names(tmp_path: Path, branch: str) -> None:
+    repository = GitStateRepository(tmp_path, tmp_path / "worktrees", branch=branch)
+
+    assert isinstance(repository, GitStateRepository)
 
 
 @pytest.mark.parametrize(

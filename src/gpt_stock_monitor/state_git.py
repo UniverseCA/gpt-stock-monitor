@@ -31,6 +31,30 @@ class StateGitError(RuntimeError):
     """A Git operation for monitor state failed without exposing Git output."""
 
 
+def _validate_branch(branch: str) -> None:
+    components = branch.split("/")
+    has_forbidden_character = any(
+        ord(character) <= 32 or ord(character) == 127 or character in "~^:?*[\\"
+        for character in branch
+    )
+    if (
+        not branch
+        or branch.startswith("-")
+        or branch == "@"
+        or ".." in branch
+        or "@{" in branch
+        or branch.endswith(".")
+        or has_forbidden_character
+        or any(
+            not component
+            or component.startswith(".")
+            or component.lower().endswith(".lock")
+            for component in components
+        )
+    ):
+        raise ValueError("invalid state git name")
+
+
 class GitStateRepository(StateRepository):
     """A compare-and-swap state repository backed by a dedicated Git branch."""
 
@@ -42,8 +66,9 @@ class GitStateRepository(StateRepository):
         branch: str = "monitor-state",
         state_filename: str = "state.json",
     ) -> None:
-        if not _SAFE_GIT_NAME.fullmatch(remote) or not _SAFE_GIT_NAME.fullmatch(branch):
+        if not _SAFE_GIT_NAME.fullmatch(remote):
             raise ValueError("invalid state git name")
+        _validate_branch(branch)
         filename = Path(state_filename)
         if (
             filename.is_absolute()
