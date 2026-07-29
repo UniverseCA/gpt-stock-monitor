@@ -21,6 +21,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 
 def _contains_control_character(value: str) -> bool:
@@ -127,7 +128,7 @@ class AppConfig(BaseModel):
     def reject_duplicate_monitor_ids(self) -> Self:
         monitor_ids = [monitor.id for monitor in self.monitors]
         if len(monitor_ids) != len(set(monitor_ids)):
-            raise ValueError("duplicate monitor id")
+            raise PydanticCustomError("duplicate_monitor_id", "duplicate monitor id")
         return self
 
 
@@ -151,10 +152,13 @@ def load_config(path: Path) -> AppConfig:
         config = AppConfig.model_validate(document)
     except ValidationError as exc:
         errors = exc.errors(include_url=False, include_context=False, include_input=False)
-        error_summary = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['type']}"
-            for error in errors
-        )
+        summary_parts = []
+        for error in errors:
+            location = ".".join(str(part) for part in error["loc"]) or "<root>"
+            if error["type"] == "duplicate_monitor_id":
+                location = "monitors.id"
+            summary_parts.append(f"{location}: {error['type']}")
+        error_summary = "; ".join(summary_parts)
     if error_summary is not None:
         document = None
         raise ConfigError(error_summary)

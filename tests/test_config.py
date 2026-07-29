@@ -42,18 +42,24 @@ def test_loads_valid_config_and_exposes_shop_id(tmp_path: Path) -> None:
 
 
 def test_rejects_duplicate_monitor_ids(tmp_path: Path) -> None:
+    duplicate_id = "sentinel-duplicate-monitor-id"
     content = (
-        VALID_CONFIG
-        + """\
-  - id: ldxp-demo
+        VALID_CONFIG.replace("ldxp-demo", duplicate_id)
+        + f"""\
+  - id: {duplicate_id}
     name: Another
     url: https://pay.ldxp.cn/shop/OTHER_2
     categories: [Category]
 """
     )
 
-    with pytest.raises(ConfigError, match="value_error"):
+    with pytest.raises(ConfigError) as exc_info:
         load_config(write_config(tmp_path, content))
+
+    message = str(exc_info.value)
+    assert "monitors.id" in message
+    assert "duplicate_monitor_id" in message
+    assert duplicate_id not in message
 
 
 @pytest.mark.parametrize(
