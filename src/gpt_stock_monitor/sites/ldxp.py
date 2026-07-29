@@ -85,11 +85,14 @@ class LdxpAdapter:
         self, config: MonitorConfig, requested_category: str
     ) -> CategoryObservation:
         category = await self._find_category(requested_category)
-        explicit_count = await self._category_count(category)
-        if not await category.evaluate("node => node.classList.contains('fl_box_leng_xz')"):
+        if not await self._is_selected(category):
             await category.click(timeout=self._navigation_timeout_ms)
             self._validate_page_url(config)
+            await self._wait_for_selected(config, category)
+            category = await self._find_category(requested_category)
+            self._validate_page_url(config)
 
+        explicit_count = await self._category_count(category)
         await self._wait_for_product_area_stability(explicit_count)
         self._validate_page_url(config)
 
@@ -116,14 +119,31 @@ class LdxpAdapter:
         categories = self._page.locator(".fl_box_leng")
         for index in range(await categories.count()):
             candidate = categories.nth(index)
-            child_texts = await candidate.locator(":scope > *").all_inner_texts()
-            if expected in {_visible_text(text) for text in child_texts}:
+            if not await candidate.is_visible():
+                continue
+            child_texts = await self._visible_direct_child_texts(candidate)
+            if expected in child_texts:
                 matches.append(candidate)
         if not matches:
             raise CategoryNotFoundError(f"configured category not found: {requested_category}")
         if len(matches) != 1:
             raise SuspiciousExtractionError("category identity is ambiguous")
         return matches[0]
+
+    async def _wait_for_selected(self, config: MonitorConfig, category: Locator) -> None:
+        max_samples = max(1, self._navigation_timeout_ms // 50)
+        for _sample in range(max_samples):
+            self._validate_page_url(config)
+            if await self._is_selected(category):
+                return
+            await self._page.wait_for_timeout(50)
+        raise SuspiciousExtractionError("requested category did not become selected")
+
+    @staticmethod
+    async def _is_selected(category: Locator) -> bool:
+        return await category.is_visible() and await category.evaluate(
+            "node => node.classList.contains('fl_box_leng_xz')"
+        )
 
     async def _wait_for_product_area_stability(self, expected_count: int) -> None:
         cards = self._page.locator(".goods_item.has_image")
@@ -142,13 +162,23 @@ class LdxpAdapter:
 
     async def _category_count(self, category: Locator) -> int:
         count_values = []
-        for text in await category.locator(":scope > *").all_inner_texts():
-            match = _COUNT.fullmatch(_visible_text(text))
+        for text in await self._visible_direct_child_texts(category):
+            match = _COUNT.fullmatch(text)
             if match is not None:
                 count_values.append(int(match.group(1)))
         if len(count_values) != 1:
             raise SuspiciousExtractionError("category lacks one trusted visible count")
         return count_values[0]
+
+    @staticmethod
+    async def _visible_direct_child_texts(parent: Locator) -> list[str]:
+        texts: list[str] = []
+        children = parent.locator(":scope > *")
+        for index in range(await children.count()):
+            child = children.nth(index)
+            if await child.is_visible():
+                texts.append(_visible_text(await child.inner_text()))
+        return texts
 
     async def _extract_product(self, card: Locator) -> Product:
         await self._remove_live_modals()

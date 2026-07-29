@@ -105,12 +105,15 @@ async def _collect(
     inspect_page: bool = False,
     navigation_requests: list[str] | None = None,
     abort_shop_navigation: bool = False,
+    extra_init_script: str = "",
 ) -> tuple[Any, dict[str, Any]]:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         page = await browser.new_page()
         harness_argument = json.dumps({"links": links}, ensure_ascii=False)
-        await page.add_init_script(script=f"({HARNESS})({harness_argument})")
+        await page.add_init_script(
+            script=f"({HARNESS})({harness_argument});\n{extra_init_script}"
+        )
 
         async def route_request(route: Route) -> None:
             if route.request.url == SHOP_URL:
@@ -153,6 +156,7 @@ def collect(
     inspect_page: bool = False,
     navigation_requests: list[str] | None = None,
     abort_shop_navigation: bool = False,
+    extra_init_script: str = "",
 ) -> tuple[Any, dict[str, Any]]:
     return asyncio.run(
         _collect(
@@ -162,6 +166,7 @@ def collect(
             inspect_page=inspect_page,
             navigation_requests=navigation_requests,
             abort_shop_navigation=abort_shop_navigation,
+            extra_init_script=extra_init_script,
         )
     )
 
@@ -293,6 +298,101 @@ def test_missing_exact_category_raises_after_at_most_three_attempts() -> None:
     assert navigation_requests == [SHOP_URL, SHOP_URL, SHOP_URL]
 
 
+def test_hidden_exact_category_is_not_a_trusted_match() -> None:
+    html = f"""<!doctype html><html><body>
+    <div class="fl_box_leng fl_box_leng_xz" style="display: none">
+      <div>{CATEGORY}</div><div>共0种商品</div>
+    </div>
+    <div class="fl_box_leng"><div>其他分类</div><div>共0种商品</div></div>
+    </body></html>"""
+
+    with pytest.raises(CategoryNotFoundError):
+        collect(html, [])
+
+
+def test_hidden_category_count_is_not_trusted_zero_evidence() -> None:
+    html = f"""<!doctype html><html><body>
+    <div class="fl_box_leng fl_box_leng_xz">
+      <div>{CATEGORY}</div><div style="display: none">共0种商品</div>
+    </div>
+    </body></html>"""
+
+    with pytest.raises(SuspiciousExtractionError):
+        collect(html, [])
+
+
+def test_duplicate_visible_zero_counts_are_ambiguous() -> None:
+    html = f"""<!doctype html><html><body>
+    <div class="fl_box_leng fl_box_leng_xz">
+      <div>{CATEGORY}</div><div>共0种商品</div><div>共0种商品</div>
+    </div>
+    </body></html>"""
+
+    with pytest.raises(SuspiciousExtractionError):
+        collect(html, [])
+
+
+DELAYED_CATEGORY_SWITCH = """
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelector("#target-category").addEventListener("click", () => {
+    setTimeout(() => {
+      document.querySelector("#old-category").classList.remove("fl_box_leng_xz");
+      document.querySelector("#target-category").classList.add("fl_box_leng_xz");
+      document.querySelector(".goods_item.has_image .name").textContent = "Target product";
+    }, 100);
+  });
+});
+"""
+
+
+def delayed_category_html() -> str:
+    return f"""<!doctype html><html><body>
+    <div id="old-category" class="fl_box_leng fl_box_leng_xz">
+      <div>其他分类</div><div>共1种商品</div>
+    </div>
+    <div id="target-category" class="fl_box_leng">
+      <div>{CATEGORY}</div><div>共1种商品</div>
+    </div>
+    <div class="goods_item has_image">
+      <div class="name">Stale product</div>
+      <div class="goods-price"><div class="currency">￥</div>
+        <div class="nowPrice">10</div></div>
+      <span class="stock">有货</span>
+    </div>
+    </body></html>"""
+
+
+def test_waits_for_requested_category_to_be_visibly_selected() -> None:
+    observations, _ = collect(
+        delayed_category_html(),
+        [{"href": "/item/target-id", "max": None}],
+        extra_init_script=DELAYED_CATEGORY_SWITCH,
+    )
+
+    assert observations[CATEGORY].products[0].name == "Target product"
+
+
+def test_rejects_unsafe_url_reached_during_delayed_category_switch() -> None:
+    unsafe_switch = """
+    document.addEventListener("DOMContentLoaded", () => {
+      document.querySelector("#target-category").addEventListener("click", () => {
+        setTimeout(() => {
+          document.querySelector("#old-category").classList.remove("fl_box_leng_xz");
+          document.querySelector("#target-category").classList.add("fl_box_leng_xz");
+          history.replaceState({}, "", "/shop/OTHER");
+        }, 100);
+      });
+    });
+    """
+
+    with pytest.raises(SiteNavigationError):
+        collect(
+            delayed_category_html(),
+            [{"href": "/item/target-id", "max": None}],
+            extra_init_script=unsafe_switch,
+        )
+
+
 def test_normalizes_category_whitespace_but_requires_exact_text() -> None:
     observations, _ = collect(
         shop_html([("Product", "10", "有货")], category=" \n GPT-plus成品号 \t"),
@@ -312,5 +412,14 @@ def test_rejects_unapproved_final_url_after_navigation() -> None:
 
 
 def test_navigation_failure_raises_site_navigation_error() -> None:
+    navigation_requests: list[str] = []
+
     with pytest.raises(SiteNavigationError):
-        collect("", [], abort_shop_navigation=True)
+        collect(
+            "",
+            [],
+            abort_shop_navigation=True,
+            navigation_requests=navigation_requests,
+        )
+
+    assert navigation_requests == [SHOP_URL, SHOP_URL, SHOP_URL]
