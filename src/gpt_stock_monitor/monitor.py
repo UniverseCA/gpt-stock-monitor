@@ -18,14 +18,35 @@ from gpt_stock_monitor.health import (
     record_success,
 )
 from gpt_stock_monitor.models import Change, PendingEvent, Snapshot, StateDocument, state_key
-from gpt_stock_monitor.notifiers.feishu import MessageTooLargeError, build_message_parts
-from gpt_stock_monitor.sites.base import CategoryObservation, SiteAdapter
+from gpt_stock_monitor.notifiers.feishu import (
+    FeishuError,
+    MessageTooLargeError,
+    build_message_parts,
+)
+from gpt_stock_monitor.sites.base import (
+    CategoryNotFoundError,
+    CategoryObservation,
+    InteractiveChallengeError,
+    SiteAdapter,
+    SiteNavigationError,
+    SuspiciousExtractionError,
+)
 from gpt_stock_monitor.state import (
     PublishStatus,
+    StateError,
     StateRepository,
     VersionedState,
     prune_unconfigured,
 )
+from gpt_stock_monitor.state_git import StateGitError
+
+_SITE_ERRORS = (
+    SiteNavigationError,
+    InteractiveChallengeError,
+    CategoryNotFoundError,
+    SuspiciousExtractionError,
+)
+_STATE_ERRORS = (StateError, StateGitError)
 
 
 class Notifier(Protocol):
@@ -75,10 +96,19 @@ def _parse_parts(event: PendingEvent) -> tuple[dict[str, object], ...] | None:
     try:
         for serialized in event.message_parts:
             payload = json.loads(serialized)
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or set(payload) != {"msg_type", "content"}:
+                return None
+            content = payload.get("content")
+            if (
+                payload.get("msg_type") != "text"
+                or not isinstance(content, dict)
+                or set(content) != {"text"}
+                or not isinstance(content.get("text"), str)
+                or not content["text"].strip()
+            ):
                 return None
             parts.append(payload)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except json.JSONDecodeError:
         return None
     return tuple(parts)
 
@@ -111,7 +141,7 @@ async def _collect(config: AppConfig, adapter: SiteAdapter) -> dict[str, _Collec
             observations = await adapter.collect(monitor)
             if not isinstance(observations, Mapping):
                 raise TypeError("adapter result must be a mapping")
-        except Exception as exc:
+        except _SITE_ERRORS as exc:
             reason = type(exc).__name__
             for category in monitor.categories:
                 collected[state_key(monitor.id, category)] = _Collected(None, reason)
@@ -262,6 +292,52 @@ async def _confirm_delivery(
     return None
 
 
+async def _drain_pending(
+    repository: StateRepository,
+    current: VersionedState,
+    notifier: Notifier,
+) -> VersionedState | RunResult:
+    drained_batches = 0
+    while True:
+        if current.document.pending_events:
+            if drained_batches >= 3:
+                return RunResult(3, _output(current.document))
+            for event in current.document.pending_events:
+                if event.event_id in current.document.delivered_event_ids:
+                    continue
+                active_event = next(
+                    (
+                        pending
+                        for pending in current.document.pending_events
+                        if pending.event_id == event.event_id
+                    ),
+                    None,
+                )
+                if active_event is None:
+                    return RunResult(3, _output(current.document))
+                parts = _parse_parts(active_event)
+                if parts is None:
+                    return RunResult(3, {"error": "invalid pending event"})
+                try:
+                    await notifier.send_parts(parts)
+                except FeishuError:
+                    return RunResult(3, _output(current.document))
+                try:
+                    confirmed = await _confirm_delivery(repository, current, active_event.event_id)
+                except _STATE_ERRORS:
+                    return RunResult(3, _output(current.document))
+                if confirmed is None:
+                    return RunResult(3, _output(current.document))
+                current = confirmed
+            drained_batches += 1
+        try:
+            current = repository.load()
+        except _STATE_ERRORS:
+            return RunResult(3, {"error": "state load failed"})
+        if not current.document.pending_events:
+            return current
+
+
 async def run_once(
     config: AppConfig,
     state_repo: StateRepository,
@@ -277,41 +353,14 @@ async def run_once(
 
     try:
         current = state_repo.load()
-    except Exception:
+    except _STATE_ERRORS:
         return RunResult(3, {"error": "state load failed"})
 
     if not dry_run:
-        for event in current.document.pending_events:
-            if event.event_id in current.document.delivered_event_ids:
-                continue
-            active_event = next(
-                (
-                    pending
-                    for pending in current.document.pending_events
-                    if pending.event_id == event.event_id
-                ),
-                None,
-            )
-            if active_event is None:
-                return RunResult(3, _output(current.document))
-            parts = _parse_parts(active_event)
-            if parts is None:
-                return RunResult(3, {"error": "invalid pending event"})
-            try:
-                await notifier.send_parts(parts)
-            except Exception:
-                return RunResult(3, _output(current.document))
-            try:
-                confirmed = await _confirm_delivery(state_repo, current, active_event.event_id)
-            except Exception:
-                return RunResult(3, _output(current.document))
-            if confirmed is None:
-                return RunResult(3, _output(current.document))
-            current = confirmed
-        try:
-            current = state_repo.load()
-        except Exception:
-            return RunResult(3, {"error": "state load failed"})
+        drained = await _drain_pending(state_repo, current, notifier)
+        if isinstance(drained, RunResult):
+            return drained
+        current = drained
 
     collected = await _collect(config, adapter)
     applied = _apply_observations(current.document, config, collected)
@@ -332,14 +381,14 @@ async def run_once(
                 published = state_repo.publish(
                     current.version, staged, "update one-shot monitor state"
                 )
-            except Exception:
+            except _STATE_ERRORS:
                 return RunResult(3, _summary(applied, current.document))
             if published.status is not PublishStatus.CONFLICT:
                 current = VersionedState(published.remote_version, staged)
                 break
             try:
                 current = state_repo.load()
-            except Exception:
+            except _STATE_ERRORS:
                 return RunResult(3, _summary(applied, current.document))
             if current.document.pending_events:
                 return RunResult(3, _summary(applied, current.document))
@@ -363,11 +412,11 @@ async def run_once(
         assert parts is not None
         try:
             await notifier.send_parts(parts)
-        except Exception:
+        except FeishuError:
             return RunResult(3, _summary(applied, current.document))
         try:
             confirmed = await _confirm_delivery(state_repo, current, staged_event.event_id)
-        except Exception:
+        except _STATE_ERRORS:
             return RunResult(3, _summary(applied, current.document))
         if confirmed is None:
             return RunResult(3, _summary(applied, current.document))

@@ -11,6 +11,7 @@ import pytest
 from gpt_stock_monitor.config import AppConfig
 from gpt_stock_monitor.models import PendingEvent, Product, Snapshot, StateDocument, state_key
 from gpt_stock_monitor.monitor import run_once
+from gpt_stock_monitor.notifiers.feishu import FeishuError
 from gpt_stock_monitor.sites.base import CategoryObservation
 from gpt_stock_monitor.state import PublishResult, PublishStatus, VersionedState
 
@@ -80,7 +81,7 @@ class Notifier:
     async def send_parts(self, parts: Any) -> None:
         self.calls.append(tuple(parts))
         if self.fail_on == len(self.calls):
-            raise RuntimeError("webhook secret=do-not-leak")
+            raise FeishuError("webhook secret=do-not-leak")
 
 
 def pending(sequence: int, event_id: str) -> PendingEvent:
@@ -445,3 +446,138 @@ def test_confirmation_reload_does_not_send_a_later_event_already_delivered_remot
 
     assert result.exit_code == 0
     assert [[part["content"]["text"] for part in call] for call in notifier.calls] == [["a"]]
+
+
+def test_pending_injected_by_post_drain_reload_is_handled_before_collection() -> None:
+    injected = StateDocument(pending_events=(pending(1, "old"),), next_event_sequence=2)
+
+    class InjectingRepository(MemoryRepository):
+        def load(self) -> VersionedState:
+            self.loads += 1
+            if self.loads == 2:
+                self.current = VersionedState("v2", injected)
+            return self.current
+
+    repository = InjectingRepository(StateDocument())
+    adapter = Adapter()
+    notifier = Notifier(fail_on=1)
+
+    result = asyncio.run(
+        run_once(app_config(), repository, adapter, notifier, dry_run=False, checked_at=CHECKED_AT)
+    )
+
+    assert result.exit_code == 3
+    assert [[part["content"]["text"] for part in call] for call in notifier.calls] == [["old"]]
+    assert adapter.calls == []
+
+
+def test_continuously_injected_pending_batches_stop_before_collection() -> None:
+    class EndlessRepository(MemoryRepository):
+        def load(self) -> VersionedState:
+            self.loads += 1
+            sequence = self.loads
+            self.current = VersionedState(
+                f"load-{sequence}",
+                StateDocument(
+                    pending_events=(pending(sequence, f"old-{sequence}"),),
+                    next_event_sequence=sequence + 1,
+                ),
+            )
+            return self.current
+
+    repository = EndlessRepository(StateDocument())
+    adapter = Adapter()
+    notifier = Notifier()
+
+    result = asyncio.run(
+        run_once(app_config(), repository, adapter, notifier, dry_run=False, checked_at=CHECKED_AT)
+    )
+
+    assert result.exit_code == 3
+    assert len(notifier.calls) == 3
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"msg_type": "text", "content": {"text": 3}},
+        {"msg_type": "text", "content": {"text": ""}},
+        {"msg_type": "text", "content": {"text": "ok"}, "secret": "leak"},
+        {"msg_type": "text", "content": {"text": "ok", "extra": "leak"}},
+    ],
+)
+def test_persisted_parts_require_exact_text_payload_schema(payload: dict[str, Any]) -> None:
+    serialized = json.dumps(payload, separators=(",", ":"))
+    event = PendingEvent(sequence=1, event_id="bad", message_parts=(serialized,))
+    repository = MemoryRepository(StateDocument(pending_events=(event,), next_event_sequence=2))
+    adapter = Adapter()
+    notifier = Notifier()
+
+    result = asyncio.run(
+        run_once(app_config(), repository, adapter, notifier, dry_run=False, checked_at=CHECKED_AT)
+    )
+
+    assert result.exit_code == 3
+    assert notifier.calls == []
+    assert repository.current.document.delivered_event_ids == ()
+    assert "leak" not in json.dumps(result.output)
+    assert adapter.calls == []
+
+
+def test_adapter_assertion_error_propagates() -> None:
+    class BrokenAdapter(Adapter):
+        async def collect(self, config: Any) -> dict[str, CategoryObservation]:
+            raise AssertionError("programming bug")
+
+    with pytest.raises(AssertionError, match="programming bug"):
+        asyncio.run(
+            run_once(
+                app_config(),
+                MemoryRepository(StateDocument()),
+                BrokenAdapter(),
+                Notifier(),
+                dry_run=True,
+                checked_at=CHECKED_AT,
+            )
+        )
+
+
+def test_notifier_assertion_error_propagates() -> None:
+    class BrokenNotifier(Notifier):
+        async def send_parts(self, parts: Any) -> None:
+            raise AssertionError("programming bug")
+
+    repository = MemoryRepository(
+        StateDocument(pending_events=(pending(1, "old"),), next_event_sequence=2)
+    )
+    with pytest.raises(AssertionError, match="programming bug"):
+        asyncio.run(
+            run_once(
+                app_config(),
+                repository,
+                Adapter(),
+                BrokenNotifier(),
+                dry_run=False,
+                checked_at=CHECKED_AT,
+            )
+        )
+
+
+def test_repository_assertion_error_propagates() -> None:
+    class BrokenRepository(MemoryRepository):
+        def load(self) -> VersionedState:
+            raise AssertionError("programming bug")
+
+    with pytest.raises(AssertionError, match="programming bug"):
+        asyncio.run(
+            run_once(
+                app_config(),
+                BrokenRepository(StateDocument()),
+                Adapter(),
+                Notifier(),
+                dry_run=False,
+                checked_at=CHECKED_AT,
+            )
+        )
