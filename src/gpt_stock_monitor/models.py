@@ -7,6 +7,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     StringConstraints,
     field_validator,
@@ -86,7 +87,7 @@ class Change(BaseModel, frozen=True):
 class PendingEvent(BaseModel, frozen=True):
     """An ordered event whose immutable message parts await delivery."""
 
-    sequence: int = Field(ge=1)
+    sequence: int = Field(ge=0)
     event_id: NonEmptyStr
     message_parts: tuple[str, ...] = Field(min_length=1)
 
@@ -107,6 +108,8 @@ class EmptyCandidate(BaseModel):
 
 class StateDocument(BaseModel):
     """Versioned, deterministic monitor state persisted on the state branch."""
+
+    model_config = ConfigDict(validate_assignment=True)
 
     schema_version: Literal[1] = 1
     snapshots: dict[str, Snapshot] = Field(default_factory=dict)
@@ -132,4 +135,10 @@ class StateDocument(BaseModel):
         event_ids = [event.event_id for event in self.pending_events]
         if len(event_ids) != len(set(event_ids)):
             raise ValueError("duplicate pending event id")
+        if self.pending_events and max(
+            event.sequence for event in self.pending_events
+        ) >= self.next_event_sequence:
+            raise ValueError(
+                "next_event_sequence must be greater than all pending event sequences"
+            )
         return self

@@ -59,6 +59,12 @@ def test_pending_event_stores_immutable_message_parts() -> None:
         event.message_parts = ("replacement",)
 
 
+def test_pending_event_allows_sequence_zero() -> None:
+    event = PendingEvent(sequence=0, event_id="event-0", message_parts=("first",))
+
+    assert event.sequence == 0
+
+
 def test_state_document_schema_version_is_fixed_at_one() -> None:
     assert StateDocument().schema_version == 1
     assert get_args(StateDocument.model_fields["schema_version"].annotation) == (1,)
@@ -72,7 +78,31 @@ def test_state_document_sorts_pending_events_deterministically() -> None:
     tie_breaker = PendingEvent(sequence=1, event_id="event-b", message_parts=("b",))
     first = PendingEvent(sequence=1, event_id="event-a", message_parts=("a",))
 
-    state = StateDocument(pending_events=(later, tie_breaker, first))
+    state = StateDocument(
+        pending_events=(later, tie_breaker, first), next_event_sequence=3
+    )
+
+    assert [(event.sequence, event.event_id) for event in state.pending_events] == [
+        (1, "event-a"),
+        (1, "event-b"),
+        (2, "event-c"),
+    ]
+
+
+def test_state_document_rejects_allocated_next_event_sequence() -> None:
+    pending = PendingEvent(sequence=2, event_id="event-2", message_parts=("pending",))
+
+    with pytest.raises(ValueError, match="next_event_sequence"):
+        StateDocument(pending_events=(pending,), next_event_sequence=1)
+
+
+def test_state_document_sorts_pending_events_after_assignment() -> None:
+    state = StateDocument(next_event_sequence=3)
+    later = PendingEvent(sequence=2, event_id="event-c", message_parts=("later",))
+    tie_breaker = PendingEvent(sequence=1, event_id="event-b", message_parts=("b",))
+    first = PendingEvent(sequence=1, event_id="event-a", message_parts=("a",))
+
+    state.pending_events = (later, tie_breaker, first)
 
     assert [(event.sequence, event.event_id) for event in state.pending_events] == [
         (1, "event-a"),
