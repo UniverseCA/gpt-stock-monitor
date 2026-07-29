@@ -26,7 +26,22 @@
 - [ ] 运行 `ruff format --check .`。
 - [ ] 运行 `ruff check .`。
 - [ ] 运行 `mypy src`。
-- [ ] 使用全新临时 basetemp 运行 `python -m pytest -q`；若 Windows ACL 阻止，保留错误记录，不删除或修改锁定目录。
+- [ ] 使用全新临时 basetemp 运行完整测试和覆盖率；若 Windows ACL 阻止，保留错误记录，不删除或修改锁定目录。
+
+PowerShell：
+
+```powershell
+$pytestDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'gpt-stock-monitor-pytest-' + [guid]::NewGuid())
+python -m pytest --basetemp $pytestDir --cov=gpt_stock_monitor --cov-report=term-missing -q
+```
+
+Bash：
+
+```bash
+pytest_dir="$(mktemp -d)"
+python -m pytest --basetemp "$pytest_dir" --cov=gpt_stock_monitor --cov-report=term-missing -q
+```
+
 - [ ] 运行与配置、CLI、工作流、URL/重定向、Secret 和状态 CAS 相关的 targeted 测试。
 - [ ] 运行 `git diff --check`。
 - [ ] 运行 `python -m build`，检查 sdist 和 wheel。

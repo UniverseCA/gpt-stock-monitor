@@ -11,6 +11,8 @@
 
 在 GitHub 页面选择 **Fork**，然后进入你自己的 Fork。工作流需要向这个 Fork 的 `monitor-state` 分支写入状态。
 
+进入 **Actions** 页面确认或启用工作流。Fork 中工作流可能默认禁用：若页面显示禁用提示，阅读提示后选择启用；若工作流已经可见，则只需确认 **CI** 和 **Monitor stock** 均在列表中。完成此步后再继续配置 Actions 写权限和运行工作流。
+
 ### 2. 配置监控项
 
 直接在 Fork 中编辑并提交已纳入版本控制的 [`config/monitors.yaml`](config/monitors.yaml)：
