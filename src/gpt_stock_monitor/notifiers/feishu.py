@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any
+from unicodedata import category
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -23,6 +27,40 @@ class MessageTooLargeError(FeishuError):
     """A single change cannot fit in a Feishu message part."""
 
 
+def _sanitize_text(value: str) -> str:
+    characters = (" " if category(character).startswith("C") else character for character in value)
+    collapsed = " ".join("".join(characters).split())
+    return collapsed.replace("<", "\uff1c").replace(">", "\uff1e")
+
+
+def _display_text(value: str | None, fallback: str) -> str:
+    if value is None:
+        return fallback
+    return _sanitize_text(value) or fallback
+
+
+def _safe_url(value: str | None) -> str | None:
+    if value is None or any(
+        category(character).startswith("C") or character.isspace() or character in '<>"'
+        for character in value
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return value
+
+
 def _change_text(change: Change) -> str:
     labels = {
         ChangeKind.ADDED: "新增",
@@ -34,15 +72,19 @@ def _change_text(change: Change) -> str:
     }
     label = labels[change.kind]
     if change.kind is ChangeKind.ADDED:
-        detail = change.after or "已新增"
+        detail = _display_text(change.after, "已新增")
     elif change.kind is ChangeKind.REMOVED:
-        detail = change.before or "已移除"
+        detail = _display_text(change.before, "已移除")
     else:
-        detail = f"{change.before or '无'} → {change.after or '无'}"
+        before = _display_text(change.before, "无")
+        after = _display_text(change.after, "无")
+        detail = f"{before} → {after}"
 
-    lines = [f"- {label} | {change.product_name} | {detail}"]
-    if change.url is not None:
-        lines.append(f"  链接: {change.url}")
+    product_name = _display_text(change.product_name, "(空白名称)")
+    lines = [f"- {label} | {product_name} | {detail}"]
+    url = _safe_url(change.url)
+    if url is not None:
+        lines.append(f"  链接: {url}")
     return "\n".join(lines)
 
 
@@ -114,23 +156,24 @@ def build_message_parts(
         return ()
 
     checked_at_text = checked_at.astimezone(_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S Asia/Shanghai")
+    safe_event_id = _display_text(event_id, "(空白事件)")
     item_texts = tuple(_change_text(change) for change in changes)
 
     total_parts = 1
     while True:
-        groups = _partition(event_id, checked_at_text, item_texts, total_parts, max_bytes)
+        groups = _partition(safe_event_id, checked_at_text, item_texts, total_parts, max_bytes)
         if len(groups) == total_parts:
             break
         total_parts = len(groups)
 
     return tuple(
-        _payload(event_id, checked_at_text, group, index, total_parts)
+        _payload(safe_event_id, checked_at_text, group, index, total_parts)
         for index, group in enumerate(groups, start=1)
     )
 
 
 def _is_numeric_zero(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int | float) and value == 0
+    return type(value) is int and value == 0
 
 
 def _safe_json_type(value: object, *, present: bool) -> str:
@@ -147,6 +190,99 @@ def _safe_json_type(value: object, *, present: bool) -> str:
     return "other"
 
 
+class _FailureKind(Enum):
+    TIMEOUT = "timeout"
+    REQUEST = "request error"
+    HTTP = "HTTP error"
+    INVALID_JSON = "invalid JSON"
+    INVALID_JSON_OBJECT = "invalid JSON object"
+    BUSINESS = "business status"
+
+
+@dataclass(frozen=True)
+class _DeliveryFailure:
+    kind: _FailureKind
+    http_status: int | None = None
+    code_type: str = "missing"
+    legacy_type: str = "missing"
+
+
+class _SecretWebhook:
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __repr__(self) -> str:
+        return "<redacted Feishu webhook>"
+
+
+async def _post_and_validate(
+    client: httpx.AsyncClient,
+    webhook: _SecretWebhook,
+    part: dict[str, Any],
+    timeout: float | httpx.Timeout,
+) -> _DeliveryFailure | None:
+    try:
+        response = await client.post(webhook.reveal(), json=part, timeout=timeout)
+    except httpx.TimeoutException:
+        return _DeliveryFailure(_FailureKind.TIMEOUT)
+    except Exception:
+        return _DeliveryFailure(_FailureKind.REQUEST)
+
+    try:
+        return _validate_response(response)
+    except Exception:
+        return _DeliveryFailure(_FailureKind.REQUEST)
+
+
+def _validate_response(response: httpx.Response) -> _DeliveryFailure | None:
+    status = response.status_code
+    if not 200 <= status < 300:
+        safe_status = status if type(status) is int and 100 <= status <= 599 else None
+        return _DeliveryFailure(_FailureKind.HTTP, http_status=safe_status)
+
+    try:
+        body = response.json()
+    except Exception:
+        return _DeliveryFailure(_FailureKind.INVALID_JSON)
+    if not isinstance(body, dict):
+        return _DeliveryFailure(_FailureKind.INVALID_JSON_OBJECT)
+
+    code_present = "code" in body
+    legacy_present = "StatusCode" in body
+    code = body.get("code")
+    legacy_code = body.get("StatusCode")
+    if code_present:
+        if _is_numeric_zero(code):
+            return None
+    elif legacy_present and _is_numeric_zero(legacy_code):
+        return None
+
+    return _DeliveryFailure(
+        _FailureKind.BUSINESS,
+        code_type=_safe_json_type(code, present=code_present),
+        legacy_type=_safe_json_type(legacy_code, present=legacy_present),
+    )
+
+
+def _raise_delivery_error(failure: _DeliveryFailure) -> None:
+    if failure.kind is _FailureKind.HTTP:
+        status = f" status {failure.http_status}" if failure.http_status is not None else ""
+        message = f"Feishu delivery failed: HTTP{status}"
+    elif failure.kind is _FailureKind.BUSINESS:
+        message = (
+            "Feishu delivery failed: business status "
+            f"(code={failure.code_type}, StatusCode={failure.legacy_type})"
+        )
+    else:
+        message = f"Feishu delivery failed: {failure.kind.value}"
+    raise FeishuError(message) from None
+
+
 class FeishuNotifier:
     """Send pre-built parts through an explicitly owned HTTP client."""
 
@@ -157,56 +293,21 @@ class FeishuNotifier:
         client: httpx.AsyncClient,
         timeout: float | httpx.Timeout = 10.0,
     ) -> None:
-        self._webhook_url = webhook_url
+        self._webhook = _SecretWebhook(webhook_url)
         self._client = client
         self._timeout = timeout
 
     async def send_parts(self, parts: Sequence[dict[str, Any]]) -> None:
         """POST each part in order and stop at the first failure."""
         for part in parts:
-            failure: str | None = None
-            response: httpx.Response | None = None
-            try:
-                response = await self._client.post(
-                    self._webhook_url,
-                    json=part,
-                    timeout=self._timeout,
-                )
-            except httpx.TimeoutException:
-                failure = "Feishu delivery failed: timeout"
-            except httpx.RequestError:
-                failure = "Feishu delivery failed: request error"
-
-            if failure is not None:
-                raise FeishuError(failure) from None
-            assert response is not None
-
-            if not 200 <= response.status_code < 300:
-                raise FeishuError(
-                    f"Feishu delivery failed: HTTP status {response.status_code}"
-                ) from None
-
-            invalid_json = False
-            body: object = None
-            try:
-                body = response.json()
-            except ValueError:
-                invalid_json = True
-            if invalid_json:
-                raise FeishuError("Feishu delivery failed: invalid JSON") from None
-            if not isinstance(body, dict):
-                raise FeishuError("Feishu delivery failed: invalid JSON object") from None
-
-            code_present = "code" in body
-            legacy_present = "StatusCode" in body
-            code = body.get("code")
-            legacy_code = body.get("StatusCode")
-            if _is_numeric_zero(code) or _is_numeric_zero(legacy_code):
+            failure = await _post_and_validate(
+                self._client,
+                self._webhook,
+                part,
+                self._timeout,
+            )
+            if failure is None:
                 continue
-
-            code_type = _safe_json_type(code, present=code_present)
-            legacy_type = _safe_json_type(legacy_code, present=legacy_present)
-            raise FeishuError(
-                "Feishu delivery failed: business status "
-                f"(code={code_type}, StatusCode={legacy_type})"
-            ) from None
+            del part
+            del parts
+            _raise_delivery_error(failure)

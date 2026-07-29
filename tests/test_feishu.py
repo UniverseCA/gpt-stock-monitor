@@ -5,7 +5,7 @@ import json
 import traceback
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -173,9 +173,7 @@ def run_send(
     [
         {"code": 0},
         {"StatusCode": 0},
-        {"code": 1, "StatusCode": 0},
         {"code": 0, "StatusCode": 1},
-        {"code": 0.0},
     ],
 )
 def test_send_parts_posts_in_order_for_documented_success_codes(body: dict[str, Any]) -> None:
@@ -196,7 +194,17 @@ def test_send_parts_does_not_request_for_empty_parts() -> None:
     assert requests == []
 
 
-@pytest.mark.parametrize("body", [{"code": False}, {"StatusCode": False}, {"code": "0"}])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"code": 923, "StatusCode": 0},
+        {"code": False},
+        {"StatusCode": False},
+        {"code": "0"},
+        {"code": 0.0},
+        {"StatusCode": 0.0},
+    ],
+)
 def test_send_parts_rejects_non_numeric_zero(body: dict[str, Any]) -> None:
     _, error = run_send([httpx.Response(200, json=body)], ({"part": 1},))
 
@@ -256,3 +264,132 @@ def test_send_parts_stops_after_first_failure() -> None:
 
     assert isinstance(error, FeishuError)
     assert len(requests) == 2
+
+
+def test_build_message_parts_sanitizes_dynamic_text_and_mention_markup() -> None:
+    change = make_change(
+        name="GPT\r\n伪造标题<at user_id='all'>所有人</at>\x00",
+        before="旧值\n伪造字段<at>before</at>",
+        after="新值\t正常价格 12.00<at>after</at>",
+        url="https://shop.example/safe\r\n<at user_id='all'>secret</at>",
+    )
+
+    text = payload_text(
+        build_message_parts("evt\r\n伪造事件<at user_id='all'>x</at>", (change,), CHECKED_AT)[0]
+    )
+
+    assert "\r" not in text
+    assert "\x00" not in text
+    assert "<at" not in text
+    assert "</at>" not in text
+    assert "\n伪造事件" not in text
+    assert "\n伪造标题" not in text
+    assert "\n伪造字段" not in text
+    assert "shop.example" not in text
+    assert "正常价格 12.00" in text
+    assert "\uff1cat" in text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "https://user:password@shop.example/item",
+        "https:///missing-host",
+        "https://shop.example/item with space",
+    ],
+)
+def test_build_message_parts_omits_unsafe_urls(url: str) -> None:
+    text = payload_text(build_message_parts("event", (make_change(url=url),), CHECKED_AT)[0])
+
+    assert url not in text
+    assert "链接:" not in text
+
+
+def test_send_parts_redacts_library_traceback_locals_and_notifier_state() -> None:
+    webhook_secret = "SENTINEL-WEBHOOK-SECRET"
+    response_secret = "SENTINEL-RESPONSE-BODY"
+    part_secret = "SENTINEL-PART-CONTENT"
+
+    async def exercise() -> tuple[FeishuNotifier, FeishuError]:
+        transport = RecordingTransport(
+            [httpx.Response(200, json={"code": 923, "msg": response_secret})]
+        )
+        client = httpx.AsyncClient(transport=transport)
+        notifier = FeishuNotifier(
+            f"https://open.feishu.invalid/hook/{webhook_secret}",
+            client=client,
+        )
+        try:
+            await notifier.send_parts(({"content": part_secret},))
+        except FeishuError as error:
+            await client.aclose()
+            return notifier, error
+        raise AssertionError("expected FeishuError")
+
+    notifier, error = asyncio.run(exercise())
+    library_locals: list[str] = []
+    current = error.__traceback__
+    while current is not None:
+        filename = current.tb_frame.f_code.co_filename.replace("\\", "/")
+        if filename.endswith("notifiers/feishu.py"):
+            values = current.tb_frame.f_locals
+            library_locals.append(repr(values))
+            library_locals.extend(repr(value) for value in values.values())
+        current = current.tb_next
+
+    rendered = " ".join((*library_locals, repr(vars(notifier))))
+    assert webhook_secret not in rendered
+    assert response_secret not in rendered
+    assert part_secret not in rendered
+
+
+def test_send_parts_converts_unexpected_external_exception_to_safe_error() -> None:
+    secret = "SENTINEL-EXTERNAL-ERROR"
+    _, error = run_send([RuntimeError(secret)], ({"content": secret},))
+
+    assert isinstance(error, FeishuError)
+    rendered = " ".join(
+        (str(error), repr(error), repr(error.args), "".join(traceback.format_exception(error)))
+    )
+    assert secret not in rendered
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def test_send_parts_converts_external_business_validation_exception() -> None:
+    secret = "SENTINEL-VALIDATION-ERROR"
+
+    class ExplodingBody(dict[str, Any]):
+        def get(self, key: str, default: object = None) -> object:
+            raise RuntimeError(secret)
+
+    class ExternalClient:
+        async def post(self, *args: object, **kwargs: object) -> object:
+            class Response:
+                status_code = 200
+
+                def json(self) -> dict[str, Any]:
+                    return ExplodingBody(code=0)
+
+            return Response()
+
+    async def exercise() -> BaseException | None:
+        notifier = FeishuNotifier(
+            "https://open.feishu.invalid/hook/SENTINEL-WEBHOOK-SECRET",
+            client=cast(httpx.AsyncClient, ExternalClient()),
+        )
+        try:
+            await notifier.send_parts(({"content": secret},))
+        except BaseException as error:
+            return error
+        return None
+
+    error = asyncio.run(exercise())
+    assert isinstance(error, FeishuError)
+    rendered = " ".join(
+        (str(error), repr(error), repr(error.args), "".join(traceback.format_exception(error)))
+    )
+    assert secret not in rendered
+    assert error.__cause__ is None
+    assert error.__context__ is None
