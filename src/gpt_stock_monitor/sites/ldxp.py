@@ -116,6 +116,21 @@ class LdxpAdapter:
         if card_count == 0:
             return CategoryObservation(products=(), explicit_count=0)
 
+        card_names: set[str] = set()
+        for index in range(card_count):
+            name_field = cards.nth(index).locator(".name")
+            try:
+                if await name_field.count() != 1 or not await name_field.is_visible():
+                    raise SuspiciousExtractionError("product card lacks one visible name")
+                card_name = _visible_text(await name_field.inner_text())
+            except PlaywrightError as exc:
+                raise SuspiciousExtractionError("product card name could not be read") from exc
+            if not card_name:
+                raise SuspiciousExtractionError("product card contains an empty name")
+            if card_name in card_names:
+                raise SuspiciousExtractionError("product names are ambiguous")
+            card_names.add(card_name)
+
         products: list[Product] = []
         product_keys: set[str] = set()
         for index in range(card_count):

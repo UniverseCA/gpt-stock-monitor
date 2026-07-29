@@ -292,6 +292,26 @@ def test_ignores_delayed_mismatched_stale_modal_and_waits_for_clicked_card() -> 
     assert state["maxLiveModals"] == 1
 
 
+def test_rejects_duplicate_product_names_before_clicking_cards() -> None:
+    with pytest.raises(SuspiciousExtractionError, match="product names are ambiguous"):
+        collect(
+            shop_html([("Same", "10", "有货"), ("Same", "20", "有货")]),
+            [
+                {
+                    "href": "/item/item-a",
+                    "max": None,
+                    "stale": {
+                        "href": "/item/stale-x",
+                        "max": None,
+                        "name": "Same",
+                        "delay": 100,
+                    },
+                },
+                {"href": "/item/item-b", "max": None, "delay": 1000},
+            ],
+        )
+
+
 def test_rejects_url_change_caused_by_product_click() -> None:
     with pytest.raises(SiteNavigationError):
         collect(
