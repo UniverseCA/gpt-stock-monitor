@@ -120,7 +120,7 @@ class GitStateRepository(StateRepository):
 
     def _fetch(self) -> None:
         self._require(
-            self._git("fetch", self._remote, cwd=self._repo_path),
+            self._git("fetch", "--prune", self._remote, cwd=self._repo_path),
             "state git fetch failed",
         )
 
@@ -192,12 +192,17 @@ class _TemporaryWorktree:
         temporary.rmdir()
         self.path = temporary
         if self._version is None:
+            # A failed first push can leave its unborn local branch behind. Use the
+            # verified unique worktree name so a later CAS attempt is independent;
+            # Actions checkouts are temporary, and branch deletion is intentionally
+            # excluded from this repository's allowed Git command set.
+            orphan_branch = f"state-publish-{temporary.name.removeprefix('state-git-')}"
             result = repository._git(
                 "worktree",
                 "add",
                 "--orphan",
                 "-b",
-                repository._branch,
+                orphan_branch,
                 str(temporary),
                 cwd=repository._repo_path,
             )

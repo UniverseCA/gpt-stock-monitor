@@ -117,6 +117,44 @@ def test_first_publish_creates_branch_even_when_state_is_empty(
     assert repo.load() == VersionedState(result.remote_version, StateDocument())
 
 
+def test_first_publish_can_be_retried_after_a_non_conflict_push_failure(
+    repositories: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, first, _ = repositories
+    repo = repository(first, tmp_path / "worktrees")
+    state = populated_state("retry")
+    real_run = subprocess.run
+    failed_once = False
+    calls: list[list[str]] = []
+
+    def fail_first_push(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal failed_once
+        calls.append(args)
+        if args[1:2] == ["push"] and not failed_once:
+            failed_once = True
+            return subprocess.CompletedProcess(args, 1, "", "secret-token")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("gpt_stock_monitor.state_git.subprocess.run", fail_first_push)
+
+    with pytest.raises(StateGitError, match=r"^state git push failed$") as caught:
+        repo.publish(None, state, "first attempt")
+    result = repo.publish(None, state, "second attempt")
+
+    assert "secret-token" not in str(caught.value)
+    assert result.status is PublishStatus.PUBLISHED
+    assert repo.load() == VersionedState(result.remote_version, state)
+    assert sum(call[1:2] == ["push"] for call in calls) == 2
+    orphan_adds = [call for call in calls if "--orphan" in call]
+    assert len(orphan_adds) == 2
+    assert orphan_adds[0][5] != orphan_adds[1][5]
+    assert all(call[5].startswith("state-publish-") for call in orphan_adds)
+    assert not any("secret-token" in " ".join(call) for call in calls)
+    assert not any(call[1:2] in (["branch"], ["update-ref"]) for call in calls)
+    push_calls = [call for call in calls if call[1:2] == ["push"]]
+    assert not any("--force" in call or "-f" in call for call in push_calls)
+
+
 def test_unchanged_publish_does_not_create_a_commit(
     repositories: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
@@ -250,7 +288,7 @@ def test_failure_uses_fixed_safe_error_without_git_output(
 
     def failing_fetch(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         del kwargs
-        assert args == ["git", "fetch", "origin"]
+        assert args == ["git", "fetch", "--prune", "origin"]
         return subprocess.CompletedProcess(args, 1, "", "https://secret-token.invalid/repo")
 
     monkeypatch.setattr("gpt_stock_monitor.state_git.subprocess.run", failing_fetch)
@@ -284,3 +322,15 @@ def test_partial_worktree_is_cleaned_when_worktree_add_fails(
         repository(first, temp_root).publish(None, populated_state("state"), "message")
 
     assert list(temp_root.iterdir()) == []
+
+
+def test_load_prunes_a_remote_tracking_branch_deleted_from_the_remote(
+    repositories: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    _, first, second = repositories
+    repo = repository(first, tmp_path / "worktrees")
+    published = repo.publish(None, populated_state("deleted"), "publish")
+    assert published.status is PublishStatus.PUBLISHED
+    assert git(second, "push", "origin", "--delete", "monitor-state").returncode == 0
+
+    assert repo.load() == VersionedState(None, StateDocument())
