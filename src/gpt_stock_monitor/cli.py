@@ -1,0 +1,171 @@
+"""Command-line entry point for one monitor cycle."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import sys
+import tempfile
+import traceback
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+import httpx
+from playwright.async_api import async_playwright
+
+from gpt_stock_monitor.config import ConfigError, load_config
+from gpt_stock_monitor.monitor import Notifier, run_once
+from gpt_stock_monitor.notifiers.feishu import FeishuError, FeishuNotifier
+from gpt_stock_monitor.sites.base import (
+    CategoryNotFoundError,
+    InteractiveChallengeError,
+    SiteAdapter,
+    SiteNavigationError,
+    SuspiciousExtractionError,
+)
+from gpt_stock_monitor.sites.ldxp import LdxpAdapter
+from gpt_stock_monitor.state import StateRepository, StateRepositoryError
+from gpt_stock_monitor.state_git import GitStateRepository
+
+_DEFAULT_CONFIG = Path("config/monitors.yaml")
+_FEISHU_WEBHOOK = re.compile(
+    r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[^\s\"'<>]+"
+)
+_RUN_ERRORS = (
+    StateRepositoryError,
+    FeishuError,
+    SiteNavigationError,
+    InteractiveChallengeError,
+    CategoryNotFoundError,
+    SuspiciousExtractionError,
+)
+
+
+@dataclass(frozen=True)
+class RuntimeServices:
+    """External boundaries used by one monitor run."""
+
+    state_repo: StateRepository
+    adapter: SiteAdapter
+    notifier: Notifier
+
+
+class _NoopNotifier:
+    async def send_parts(self, parts: Sequence[dict[str, object]]) -> None:
+        del parts
+
+
+@asynccontextmanager
+async def build_production_services(
+    webhook_url: str | None,
+) -> AsyncIterator[RuntimeServices]:
+    """Create and reliably close ordinary production service boundaries."""
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            repository = GitStateRepository(
+                Path.cwd(),
+                Path(tempfile.gettempdir()) / "gpt-stock-monitor",
+            )
+            if webhook_url is None:
+                yield RuntimeServices(repository, LdxpAdapter(page), _NoopNotifier())
+            else:
+                async with httpx.AsyncClient() as client:
+                    yield RuntimeServices(
+                        repository,
+                        LdxpAdapter(page),
+                        FeishuNotifier(webhook_url, client=client),
+                    )
+        finally:
+            await browser.close()
+
+
+ServicesFactory = Callable[
+    [str | None],
+    AbstractAsyncContextManager[RuntimeServices],
+]
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="gpt-stock-monitor")
+    parser.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
+    parser.add_argument("--dry-run", action="store_true")
+    return parser
+
+
+def _redact(text: str, webhook_url: str | None) -> str:
+    if webhook_url:
+        text = text.replace(webhook_url, "[REDACTED]")
+    return _FEISHU_WEBHOOK.sub("[REDACTED]", text)
+
+
+async def _run(
+    config_path: Path,
+    *,
+    dry_run: bool,
+    webhook_url: str | None,
+    services_factory: ServicesFactory,
+) -> tuple[int, dict[str, object]]:
+    config = load_config(config_path)
+    async with services_factory(webhook_url) as services:
+        result = await run_once(
+            config,
+            services.state_repo,
+            services.adapter,
+            services.notifier,
+            dry_run=dry_run,
+            checked_at=datetime.now(UTC),
+        )
+    return result.exit_code, result.output
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    services_factory: ServicesFactory = build_production_services,
+) -> int:
+    """Run one cycle and return its process exit code."""
+    arguments = _parser().parse_args(argv)
+    webhook_url = None if arguments.dry_run else os.environ.get("FEISHU_WEBHOOK_URL")
+    if not arguments.dry_run and not webhook_url:
+        sys.stderr.write("configuration error: FEISHU_WEBHOOK_URL is required\n")
+        return 2
+
+    try:
+        exit_code, output = asyncio.run(
+            _run(
+                arguments.config,
+                dry_run=arguments.dry_run,
+                webhook_url=webhook_url,
+                services_factory=services_factory,
+            )
+        )
+    except ConfigError:
+        sys.stderr.write("configuration error: invalid configuration\n")
+        return 2
+    except _RUN_ERRORS:
+        sys.stderr.write("monitor run failed\n")
+        return 3
+    except Exception:
+        diagnostic = _redact(traceback.format_exc(), webhook_url)
+        sys.stderr.write(diagnostic)
+        return 3
+
+    serialized = json.dumps(
+        output,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    sys.stdout.write(f"{serialized}\n")
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

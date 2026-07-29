@@ -14,6 +14,9 @@ dependencies = [
   "httpx>=0.27,<1",
 ]
 
+[project.scripts]
+gpt-stock-monitor = "gpt_stock_monitor.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest",
