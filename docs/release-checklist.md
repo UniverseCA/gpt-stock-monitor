@@ -14,7 +14,7 @@
 ## Secret 与安全
 
 - [ ] 扫描仓库，确认不存在真实飞书 hook、token、Cookie、凭据或本地环境文件。
-- [ ] 确认 `FEISHU_WEBHOOK_URL` 只作为 GitHub Actions repository Secret 配置，不记录其值。
+- [ ] 确认 `FEISHU_WEBHOOK_URL` 只作为 `monitor-production` Environment secret 配置，不记录其值。
 - [ ] 确认店铺 URL、最终重定向、浏览器挑战和 Secret 脱敏测试通过。
 - [ ] 确认测试禁真实网络，不访问真实店铺、不调用真实 Webhook。
 - [ ] 确认没有验证码绕过、代理池、自动购买或下单能力。
@@ -43,6 +43,7 @@ python -m pytest --basetemp "$pytest_dir" --cov=gpt_stock_monitor --cov-report=t
 ```
 
 - [ ] 运行与配置、CLI、工作流、URL/重定向、Secret 和状态 CAS 相关的 targeted 测试。
+- [ ] 确认 CI 在依赖和 Chromium 安装后以 IPv4/IPv6 出站规则、loopback/已有连接例外及 `no-new-privs` 运行 pytest，并可靠清理本步骤规则。
 - [ ] 运行 `git diff --check`。
 - [ ] 运行 `python -m build`，检查 sdist 和 wheel。
 - [ ] 在干净临时虚拟环境中安装 wheel，并运行 `python -m gpt_stock_monitor.cli --help`。
@@ -50,7 +51,8 @@ python -m pytest --basetemp "$pytest_dir" --cov=gpt_stock_monitor --cov-report=t
 ## GitHub Fork 配置
 
 - [ ] Fork 中已提交正确的 `config/monitors.yaml`。
-- [ ] 已创建飞书自定义机器人，Webhook 仅存入 `FEISHU_WEBHOOK_URL` repository Secret。
+- [ ] 已创建 `monitor-production` Environment，只允许 Fork 默认分支部署，且未配置阻塞定时任务的逐次人工批准。
+- [ ] 已创建飞书自定义机器人，Webhook 仅存入该 Environment 的 `FEISHU_WEBHOOK_URL` secret。
 - [ ] **Settings → Actions → General → Workflow permissions** 已设为 **Read and write permissions**。
 - [ ] 手动 `dry_run=true` 已成功；明确它会访问真实店铺，但不会发送消息或写状态。
 - [ ] 首次授权的实时运行已建立静默基线。

@@ -96,8 +96,7 @@ def _should_notify_failure(count: int) -> bool:
 def _sanitize_reason(reason: str) -> str:
     text = str(reason)
     text = "".join(
-        " " if unicodedata.category(character).startswith("C") else character
-        for character in text
+        " " if unicodedata.category(character).startswith("C") else character for character in text
     )
     text = " ".join(text.split())
     text = _URL_PATTERN.sub("<url>", text)

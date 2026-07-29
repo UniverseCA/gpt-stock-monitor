@@ -47,9 +47,7 @@ def _validate_branch(branch: str) -> None:
         or branch.endswith(".")
         or has_forbidden_character
         or any(
-            not component
-            or component.startswith(".")
-            or component.lower().endswith(".lock")
+            not component or component.startswith(".") or component.lower().endswith(".lock")
             for component in components
         )
     ):
@@ -176,10 +174,12 @@ class GitStateRepository(StateRepository):
         env: dict[str, str] | None = None,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        subprocess_environment = dict(os.environ if env is None else env)
+        subprocess_environment.pop("FEISHU_WEBHOOK_URL", None)
         return subprocess.run(
             ["git", *args],
             cwd=cwd,
-            env=env,
+            env=subprocess_environment,
             input=input_text,
             check=False,
             shell=False,

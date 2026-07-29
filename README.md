@@ -37,14 +37,16 @@ monitors:
 
 Webhook 等同于密码：不要写进 YAML、代码、提交、Issue、截图或日志。
 
-### 4. 添加仓库 Secret
+### 4. 创建受保护 Environment 并添加 Secret
 
-在 Fork 中打开 **Settings → Secrets and variables → Actions → New repository secret**：
+在 Fork 中打开 **Settings → Environments → New environment**，创建固定名称 `monitor-production`。在该 Environment 的 **Deployment branches and tags** 中只允许 Fork 的默认分支部署；不要配置每次运行都需要人工批准的保护规则，否则每 5 分钟的定时任务无法自动执行。
+
+随后在 `monitor-production` 的 **Environment secrets → Add secret** 中添加：
 
 - Name：`FEISHU_WEBHOOK_URL`
 - Secret：上一步复制的完整 Webhook
 
-程序只接受 HTTPS、主机为 `open.feishu.cn`、标准机器人路径且无查询参数/片段/凭据的 Webhook。CLI 会对异常中的 Webhook 和 token 做脱敏，但仍应避免主动打印 Secret。
+该值必须是 Environment secret，不是 repository secret。程序只接受 HTTPS、主机为 `open.feishu.cn`、标准机器人路径且无查询参数/片段/凭据的 Webhook。CLI 会对异常中的 Webhook 和 token 做脱敏，但仍应避免主动打印 Secret。
 
 ### 5. 允许 Actions 写状态分支
 
@@ -85,7 +87,7 @@ dry-run 会使用普通无头 Chromium 访问配置的真实店铺并读取远�
 
 ### 提示 `configuration error`
 
-检查 YAML 缩进、必填字段、重复 `id`，并确认店铺 URL 精确符合 `https://pay.ldxp.cn/shop/<shop_id>`。非 dry-run 还必须配置有效的 `FEISHU_WEBHOOK_URL`。
+检查 YAML 缩进、必填字段、重复 `id`，并确认店铺 URL 精确符合 `https://pay.ldxp.cn/shop/<shop_id>`。非 dry-run 还必须在 `monitor-production` Environment 中配置有效的 `FEISHU_WEBHOOK_URL`。
 
 ### 提示 `monitor run failed` 或出现健康告警
 
@@ -110,7 +112,7 @@ mypy src
 python -m pytest -q
 ```
 
-测试应保持禁网：使用现有 HTML fixture、fake adapter 和 HTTP mock，不访问真实店铺，不调用真实飞书 Webhook。
+CI 在依赖和 Chromium 安装完成后用操作系统级 IPv4/IPv6 出站规则运行 pytest，只保留 loopback 和已有连接，并以 `no-new-privs` 防止测试子进程提权撤销规则。本地测试也必须保持离线：使用现有 HTML fixture、fake adapter、HTTP mock，并通过 Playwright `page.route` 提供样本，不访问真实店铺或真实飞书 Webhook。Python fixture 或 mock 本身不能单独保证所有子进程断网。
 
 查看 CLI：
 

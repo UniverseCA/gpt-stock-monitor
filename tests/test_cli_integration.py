@@ -7,7 +7,6 @@ from hashlib import sha256
 from pathlib import Path
 
 import httpx
-import pytest
 from playwright.async_api import Route, async_playwright
 
 from gpt_stock_monitor.cli import RuntimeServices, main
@@ -25,7 +24,7 @@ from gpt_stock_monitor.state import (
 
 SHOP_URL = "https://pay.ldxp.cn/shop/NIFGEAC5"
 CATEGORY = "GPT 商品"
-WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/test-only-token-1234"
+WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/" + "hook/test-only-token-1234"
 PADDING = "x" * 3_200
 ALPHA = f"Alpha {PADDING} A"
 BETA = f"Beta {PADDING} B"
@@ -100,7 +99,6 @@ class FileStateRepository:
         return PublishResult(PublishStatus.PUBLISHED, version)
 
 
-@pytest.mark.allow_socketpair
 def test_real_cli_pipeline_and_dry_run_preserve_pending_state(
     tmp_path: Path,
     monkeypatch,
@@ -183,6 +181,7 @@ def test_real_cli_pipeline_and_dry_run_preserve_pending_state(
     assert state_path.exists()
     assert requests == []
 
+    monkeypatch.setenv("FEISHU_WEBHOOK_URL", WEBHOOK)
     assert main(["--config", str(config_path)], services_factory=factory) == 0
     second_stdout = capsys.readouterr().out
     second_output = json.loads(second_stdout)

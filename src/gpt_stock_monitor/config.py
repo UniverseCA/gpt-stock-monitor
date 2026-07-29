@@ -111,6 +111,12 @@ class MonitorConfig(BaseModel):
             raise ValueError("shop URL must be a string")
         return validate_shop_url(value)
 
+    @model_validator(mode="after")
+    def reject_duplicate_categories(self) -> Self:
+        if len(self.categories) != len(set(self.categories)):
+            raise PydanticCustomError("duplicate_category", "duplicate category")
+        return self
+
     @property
     def shop_id(self) -> str:
         """Return the validated shop identifier from the URL path."""

@@ -118,9 +118,7 @@ def test_repository_accepts_safe_short_branch_names(tmp_path: Path, branch: str)
     "state_filename",
     ["--state.json", "-f", "..", ".", "", "../state.json", "nested/state.json"],
 )
-def test_repository_rejects_unsafe_state_filenames(
-    tmp_path: Path, state_filename: str
-) -> None:
+def test_repository_rejects_unsafe_state_filenames(tmp_path: Path, state_filename: str) -> None:
     with pytest.raises(ValueError, match=r"^invalid state filename$"):
         GitStateRepository(tmp_path, tmp_path / "worktrees", state_filename=state_filename)
 
@@ -243,9 +241,7 @@ def test_changed_publish_is_one_atomic_commit(
     commit_count = git(
         first, "rev-list", "--count", f"{initial.remote_version}..{changed.remote_version}"
     ).stdout.strip()
-    parent = git(
-        first, "show", "-s", "--format=%P", changed.remote_version
-    ).stdout.strip()
+    parent = git(first, "show", "-s", "--format=%P", changed.remote_version).stdout.strip()
     assert commit_count == "1"
     assert parent == initial.remote_version
     assert repo.load() == VersionedState(changed.remote_version, populated_state("new"))
@@ -332,9 +328,7 @@ def test_exact_lease_rejects_remote_deletion_or_rollback_during_publish(
     real_run = subprocess.run
     push_command: list[str] | None = None
 
-    def change_remote_at_push(
-        args: list[str], **kwargs: Any
-    ) -> subprocess.CompletedProcess[str]:
+    def change_remote_at_push(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         nonlocal push_command
         if args[1:2] == ["push"] and push_command is None:
             push_command = args
@@ -381,6 +375,8 @@ def test_git_commands_use_safe_subprocess_contract_and_do_not_contain_remote_sec
     _, first, _ = repositories
     calls: list[tuple[list[str], dict[str, object]]] = []
     real_run = subprocess.run
+    inherited_path = os.environ["PATH"]
+    monkeypatch.setenv("FEISHU_WEBHOOK_URL", "secret-webhook-token")
 
     def recording_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append((args, kwargs))
@@ -397,6 +393,10 @@ def test_git_commands_use_safe_subprocess_contract_and_do_not_contain_remote_sec
         assert kwargs["check"] is False
         assert kwargs["text"] is True
         assert "secret-token" not in " ".join(args)
+        command_env = kwargs["env"]
+        assert isinstance(command_env, dict)
+        assert "FEISHU_WEBHOOK_URL" not in command_env
+        assert command_env["PATH"] == inherited_path
     commit_call = next(item for item in calls if item[0][1:2] == ["commit"])
     commit_env = commit_call[1]["env"]
     assert isinstance(commit_env, dict)
@@ -438,9 +438,7 @@ def test_partial_worktree_is_cleaned_when_worktree_add_fails(
     temp_root = tmp_path / "worktrees"
     real_run = subprocess.run
 
-    def failing_worktree_add(
-        args: list[str], **kwargs: Any
-    ) -> subprocess.CompletedProcess[str]:
+    def failing_worktree_add(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if args[1:3] == ["worktree", "add"]:
             partial_path = Path(args[-1])
             partial_path.mkdir(parents=True)
@@ -534,9 +532,7 @@ def test_cleanup_failure_is_reported_when_both_remove_attempts_fail(
     monkeypatch.setattr("gpt_stock_monitor.state_git.subprocess.run", fail_remove)
 
     with pytest.raises(StateGitError, match=r"^state git cleanup failed$") as caught:
-        repository(first, tmp_path / "worktrees").publish(
-            None, populated_state("state"), "publish"
-        )
+        repository(first, tmp_path / "worktrees").publish(None, populated_state("state"), "publish")
 
     assert remove_calls == 2
     assert "secret-token" not in str(caught.value)
@@ -567,9 +563,7 @@ def test_cleanup_failure_does_not_mask_an_existing_publication_error(
     monkeypatch.setattr("gpt_stock_monitor.state_git.write_state_atomic", fail_write)
 
     with pytest.raises(PublicationSentinel, match=r"^primary$"):
-        repository(first, tmp_path / "worktrees").publish(
-            None, populated_state("state"), "publish"
-        )
+        repository(first, tmp_path / "worktrees").publish(None, populated_state("state"), "publish")
 
     assert remove_calls == 2
 

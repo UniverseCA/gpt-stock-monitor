@@ -11,29 +11,20 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_ROOT))
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers",
-        "allow_socketpair: allow only stdlib socketpair local IPC for this test",
-    )
-
-
 @pytest.fixture(autouse=True)
-def block_public_network(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def block_public_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make accidental public network access fail at the socket boundary."""
     original_socket = socket.socket
     original_socket_type = _socket.socket
     original_socketpair = socket.socketpair
     socketpair_code = getattr(original_socketpair, "__code__", None)
-    allow_socketpair = request.node.get_closest_marker("allow_socketpair") is not None
 
-    class GuardedSocket(original_socket_type):
+    class GuardedSocket(original_socket):
         def __init__(self, *args: object, **kwargs: object) -> None:
-            caller = sys._getframe(1)
-            self._allow_local_ipc = allow_socketpair and caller.f_code is socketpair_code
-            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            self._allow_local_ipc = sys._getframe(1).f_code is socketpair_code
+            original_socket_type.__init__(self, *args, **kwargs)  # type: ignore[arg-type]
+            self._io_refs = 0
+            self._closed = False
 
         def __enter__(self) -> GuardedSocket:
             return self
@@ -43,8 +34,7 @@ def block_public_network(
             self.close()
 
         def connect(self, address: object) -> None:
-            caller = sys._getframe(1)
-            if self._allow_local_ipc and caller.f_code is socketpair_code:
+            if self._allow_local_ipc and sys._getframe(1).f_code is socketpair_code:
                 return super().connect(address)  # type: ignore[arg-type]
             raise AssertionError("network access is disabled in tests")
 
@@ -84,9 +74,11 @@ def block_public_network(
                 connection._allow_local_ipc = True
             return connection, address
 
-    def blocked_socketpair(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        raise AssertionError("network access is disabled in tests")
+    def guarded_socketpair(*args: object, **kwargs: object) -> tuple[GuardedSocket, GuardedSocket]:
+        left, right = original_socketpair(*args, **kwargs)  # type: ignore[arg-type]
+        left._allow_local_ipc = True
+        right._allow_local_ipc = True
+        return left, right
 
     def blocked(*args: object, **kwargs: object) -> None:
         del args, kwargs
@@ -95,6 +87,7 @@ def block_public_network(
     monkeypatch.setattr(socket, "socket", GuardedSocket)
     monkeypatch.setattr(socket, "SocketType", GuardedSocket)
     monkeypatch.setattr(_socket, "socket", GuardedSocket)
+    monkeypatch.setattr(socket, "socketpair", guarded_socketpair)
     monkeypatch.setattr(socket, "create_connection", blocked)
     for name in (
         "getaddrinfo",
@@ -107,5 +100,3 @@ def block_public_network(
         monkeypatch.setattr(socket, name, blocked)
         if hasattr(_socket, name):
             monkeypatch.setattr(_socket, name, blocked)
-    if not allow_socketpair:
-        monkeypatch.setattr(socket, "socketpair", blocked_socketpair)

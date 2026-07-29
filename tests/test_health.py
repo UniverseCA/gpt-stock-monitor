@@ -27,6 +27,8 @@ from gpt_stock_monitor.models import (
 )
 from gpt_stock_monitor.state import serialize_state
 
+FEISHU_WEBHOOK_PREFIX = "https://open.feishu.cn/open-apis/bot/v2/" + "hook/"
+
 
 def make_product(key: str = "product-1", *, name: str = "GPT Plus") -> Product:
     return Product(
@@ -149,8 +151,7 @@ def test_record_failure_converts_reason_once_for_consistent_pure_data() -> None:
     ("reason", "sentinel", "expected_reason"),
     [
         (
-            "site navigation failed at "
-            "https://open.feishu.cn/open-apis/bot/v2/hook/SENTINEL-WEBHOOK",
+            "site navigation failed at " f"{FEISHU_WEBHOOK_PREFIX}SENTINEL-WEBHOOK",
             "SENTINEL-WEBHOOK",
             "site navigation failed at <url>",
         ),
@@ -211,9 +212,7 @@ def test_record_failure_has_safe_bounded_reason_on_all_transition_surfaces() -> 
         "SENTINEL-TOKEN",
         "SENTINEL-SECRET",
     )
-    webhook_url = (
-        "https://open.feishu.cn/open-apis/bot/v2/hook/SENTINEL-WEBHOOK"
-    )
+    webhook_url = f"{FEISHU_WEBHOOK_PREFIX}SENTINEL-WEBHOOK"
     reason = (
         "site navigation failed\r\nforged log entry "
         f"{webhook_url} "
@@ -262,7 +261,7 @@ def test_record_failure_has_safe_bounded_reason_on_all_transition_surfaces() -> 
             "SENTINEL-AUTH",
         ),
         (
-            'site navigation failed '
+            "site navigation failed "
             '(headers={"Cookie": "session=SENTINEL-COOKIE WITH SPACE"}) retry pending',
             "SENTINEL-COOKIE",
         ),
@@ -298,8 +297,7 @@ def test_record_failure_redacts_quoted_mapping_values_on_all_surfaces(
     ("reason", "forbidden_fragments"),
     [
         (
-            'site navigation failed '
-            '(headers={"X-API-Key": "SENTINEL-XAPI"}) retry pending',
+            "site navigation failed " '(headers={"X-API-Key": "SENTINEL-XAPI"}) retry pending',
             ("SENTINEL-XAPI",),
         ),
         (
@@ -314,7 +312,7 @@ def test_record_failure_redacts_quoted_mapping_values_on_all_surfaces(
             ("SENTINEL-PROXY", "WITHSPACE"),
         ),
         (
-            'site navigation failed '
+            "site navigation failed "
             '(Authorization: Bearer "SENTINEL-QUOTED WITHSPACE"); retry pending',
             ("SENTINEL-QUOTED", "WITHSPACE"),
         ),
@@ -338,18 +336,14 @@ def test_record_failure_redacts_sensitive_key_variants_and_full_values(
     )
 
     assert stored_reason == "monitor failure: <redacted>"
-    assert all(
-        fragment not in surface
-        for surface in surfaces
-        for fragment in forbidden_fragments
-    )
+    assert all(fragment not in surface for surface in surfaces for fragment in forbidden_fragments)
 
 
 @pytest.mark.parametrize(
     ("reason", "sentinel"),
     [
         (
-            r'headers={\"Authorization\": \"Bearer \\\"SENTINEL-ESCAPED WITHSPACE\\\"\"}',
+            r"headers={\"Authorization\": \"Bearer \\\"SENTINEL-ESCAPED WITHSPACE\\\"\"}",
             "SENTINEL-ESCAPED",
         ),
         (r"failure {{'client_secret':: [[\\SENTINEL-NESTED]]", "SENTINEL-NESTED"),

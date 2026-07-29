@@ -19,7 +19,7 @@
 
 - **店铺 URL：** 仅允许 HTTPS `pay.ldxp.cn` 的 `/shop/<shop_id>` 路径、默认 HTTPS 端口，禁止查询参数、片段和用户凭据。
 - **重定向：** 浏览器导航后的最终 URL 必须仍是获准主机、路径和相同 `shop_id`；跨店铺或跨主机重定向会失败。
-- **Webhook Secret：** 只通过仓库 Secret `FEISHU_WEBHOOK_URL` 注入实时通知步骤，不应进入配置、源码、状态分支或日志。CLI 对已知 Webhook/token 和异常中的相同模式进行脱敏；这不是公开 Secret 的许可。
+- **Webhook Secret：** 只通过受保护的 `monitor-production` Environment secret `FEISHU_WEBHOOK_URL` 注入实时通知步骤，不应进入配置、源码、状态分支或日志。该 Environment 只允许仓库默认分支部署，`monitor-state` 仅保存同仓库状态且不能读取该 Secret；不要配置会阻塞定时任务的逐次人工批准。CLI 对已知 Webhook/token 和异常中的相同模式进行脱敏；这不是公开 Secret 的许可。
 - **浏览器：** 使用普通无头 Playwright Chromium，不使用代理池、隐身或反检测技术。检测到验证码或交互式挑战时安全失败，不尝试绕过。
 - **通知：** 状态先持久化、通知后确认，提供至少一次投递语义；故障窗口内可能重复发送。事件 ID 可用于去重。
 

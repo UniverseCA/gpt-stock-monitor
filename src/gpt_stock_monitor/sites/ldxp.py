@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Locator, Page
+from playwright.async_api import Locator, Page, Route
 
 from gpt_stock_monitor.config import MonitorConfig, validate_final_url
 from gpt_stock_monitor.models import Availability, Product
@@ -35,12 +36,57 @@ class LdxpAdapter:
     def __init__(self, page: Page, *, navigation_timeout_ms: int = 15_000) -> None:
         self._page = page
         self._navigation_timeout_ms = navigation_timeout_ms
+        self._unsafe_request_detected = False
 
     async def collect(self, config: MonitorConfig) -> Mapping[str, CategoryObservation]:
-        observations: dict[str, CategoryObservation] = {}
-        for category in config.categories:
-            observations[category] = await self._collect_with_retries(config, category)
-        return observations
+        self._unsafe_request_detected = False
+
+        async def guard_request(route: Route) -> None:
+            if self._request_is_approved(config, route):
+                await route.fallback()
+                return
+            self._unsafe_request_detected = True
+            await route.abort()
+
+        context = self._page.context
+        await context.route("**/*", guard_request)
+        try:
+            observations: dict[str, CategoryObservation] = {}
+            for category in config.categories:
+                observations[category] = await self._collect_with_retries(config, category)
+            return observations
+        finally:
+            try:
+                await context.unroute("**/*", guard_request)
+            except PlaywrightError:
+                if not self._page.is_closed():
+                    raise
+
+    def _request_is_approved(self, config: MonitorConfig, route: Route) -> bool:
+        request = route.request
+        if request.is_navigation_request():
+            try:
+                validate_final_url(config.shop_id, request.url)
+            except ValueError:
+                return False
+            return True
+
+        try:
+            parsed = urlsplit(request.url)
+            port = parsed.port
+        except (TypeError, ValueError):
+            return False
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "pay.ldxp.cn"
+            and parsed.username is None
+            and parsed.password is None
+            and port in (None, 443)
+        )
+
+    def _raise_if_unsafe_request(self) -> None:
+        if self._unsafe_request_detected:
+            raise SiteNavigationError("shop request was blocked by navigation policy") from None
 
     async def _collect_with_retries(
         self, config: MonitorConfig, category: str
@@ -53,6 +99,8 @@ class LdxpAdapter:
             except InteractiveChallengeError:
                 raise
             except (CategoryNotFoundError, SiteNavigationError, SuspiciousExtractionError) as exc:
+                if self._unsafe_request_detected:
+                    raise
                 last_error = exc
             except PlaywrightError as exc:
                 last_error = SuspiciousExtractionError("site extraction lifecycle failed")
@@ -71,6 +119,7 @@ class LdxpAdapter:
         except PlaywrightError as exc:
             navigation_error = exc
 
+        self._raise_if_unsafe_request()
         self._validate_page_url(config)
         if navigation_error is not None:
             raise SiteNavigationError("shop navigation failed") from navigation_error
@@ -83,6 +132,7 @@ class LdxpAdapter:
             raise InteractiveChallengeError("shop requires interactive verification")
 
     def _validate_page_url(self, config: MonitorConfig) -> None:
+        self._raise_if_unsafe_request()
         try:
             validate_final_url(config.shop_id, self._page.url)
         except ValueError as exc:
@@ -104,9 +154,7 @@ class LdxpAdapter:
             self._validate_page_url(config)
 
         explicit_count = await self._category_count(category)
-        await self._wait_for_product_area_stability(
-            config, explicit_count, previous_fingerprint
-        )
+        await self._wait_for_product_area_stability(config, explicit_count, previous_fingerprint)
         self._validate_page_url(config)
 
         cards = self._page.locator(".goods_item.has_image")
@@ -328,8 +376,7 @@ class LdxpAdapter:
                 raise SuspiciousExtractionError("product item link is noncanonical")
             quantity = modal.locator('input[role="spinbutton"]')
             out_of_stock = (
-                await quantity.count() == 1
-                and await quantity.get_attribute("aria-valuemax") == "0"
+                await quantity.count() == 1 and await quantity.get_attribute("aria-valuemax") == "0"
             )
             self._validate_page_url(config)
             return match.group(1), out_of_stock

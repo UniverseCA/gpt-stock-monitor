@@ -22,6 +22,7 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: monitor-production
     env:
       GIT_AUTHOR_NAME: github-actions[bot]
       GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com

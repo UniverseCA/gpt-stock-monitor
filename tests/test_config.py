@@ -9,6 +9,7 @@ import gpt_stock_monitor.config as config_module
 from gpt_stock_monitor.config import (
     AppConfig,
     ConfigError,
+    MonitorConfig,
     load_config,
     validate_final_url,
     validate_shop_url,
@@ -74,6 +75,45 @@ def test_rejects_empty_categories_and_empty_category_names(tmp_path: Path, categ
 
     with pytest.raises(ConfigError):
         load_config(write_config(tmp_path, content))
+
+
+@pytest.mark.parametrize(
+    "categories",
+    [
+        ("same", "same"),
+        (" same ", "same"),
+    ],
+)
+def test_rejects_duplicate_categories_after_normalization(
+    categories: tuple[str, str],
+) -> None:
+    duplicate = "same"
+
+    with pytest.raises(ValueError) as exc_info:
+        MonitorConfig.model_validate(
+            {
+                "id": "monitor",
+                "name": "Monitor",
+                "url": "https://pay.ldxp.cn/shop/MONITOR",
+                "categories": categories,
+            }
+        )
+
+    assert "duplicate_category" in str(exc_info.value)
+    assert duplicate not in str(exc_info.value)
+
+
+def test_category_duplicate_check_remains_case_sensitive() -> None:
+    monitor = MonitorConfig.model_validate(
+        {
+            "id": "monitor",
+            "name": "Monitor",
+            "url": "https://pay.ldxp.cn/shop/MONITOR",
+            "categories": ("same", "Same"),
+        }
+    )
+
+    assert monitor.categories == ("same", "Same")
 
 
 @pytest.mark.parametrize(

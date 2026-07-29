@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -144,9 +145,7 @@ async def _collect(
         browser = await playwright.chromium.launch()
         page = await browser.new_page()
         harness_argument = json.dumps({"links": links}, ensure_ascii=False)
-        await page.add_init_script(
-            script=f"({HARNESS})({harness_argument});\n{extra_init_script}"
-        )
+        await page.add_init_script(script=f"({HARNESS})({harness_argument});\n{extra_init_script}")
 
         async def route_request(route: Route) -> None:
             if route.request.url == SHOP_URL:
@@ -161,8 +160,9 @@ async def _collect(
             else:
                 await route.abort()
 
-        await page.route("**/*", route_request)
+        await page.context.route("**/*", route_request)
         if close_page_after_ms is not None:
+
             async def close_page_later() -> None:
                 await page.wait_for_timeout(close_page_after_ms)
                 await page.close()
@@ -358,12 +358,255 @@ def test_body_playwright_error_is_mapped_to_site_navigation_error() -> None:
                     body=shop_html([]),
                 )
 
-            await page.route("**/*", route_request)
+            await page.context.route("**/*", route_request)
             with patch.object(page, "locator", side_effect=PlaywrightError("body unavailable")):
                 await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(config())
 
     with pytest.raises(SiteNavigationError):
         asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "intermediate_url",
+    [
+        "https://evil.example/redirect",
+        "http://127.0.0.1/redirect",
+        "https://pay.ldxp.cn/shop/OTHER",
+        "https://pay.ldxp.cn/shop/NIFGEAC5?next=1",
+        "https://pay.ldxp.cn:444/shop/NIFGEAC5",
+    ],
+)
+def test_aborts_unapproved_redirect_hop_before_existing_route_observes_it(
+    intermediate_url: str,
+) -> None:
+    observed_requests: list[str] = []
+
+    async def exercise() -> None:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+            returning_to_shop = False
+
+            async def route_request(route: Route) -> None:
+                nonlocal returning_to_shop
+                observed_requests.append(route.request.url)
+                if route.request.url == SHOP_URL:
+                    if returning_to_shop:
+                        await route.fulfill(
+                            status=200,
+                            content_type="text/html; charset=utf-8",
+                            body=shop_html([]),
+                        )
+                    else:
+                        await route.fulfill(
+                            status=302,
+                            headers={"location": intermediate_url},
+                        )
+                elif route.request.url == intermediate_url:
+                    returning_to_shop = True
+                    await route.fulfill(status=302, headers={"location": SHOP_URL})
+                else:
+                    await route.abort()
+
+            await page.context.route("**/*", route_request)
+            try:
+                await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(config())
+            finally:
+                await browser.close()
+
+    with pytest.raises(SiteNavigationError) as exc_info:
+        asyncio.run(exercise())
+
+    assert intermediate_url not in observed_requests
+    assert intermediate_url not in "".join(
+        traceback.format_exception(exc_info.type, exc_info.value, exc_info.tb)
+    )
+
+
+def test_unroutes_failed_monitor_guard_before_collecting_another_monitor() -> None:
+    other_shop_url = "https://pay.ldxp.cn/shop/OTHER"
+    intermediate_url = "https://evil.example/redirect"
+
+    async def exercise() -> None:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+
+            async def route_request(route: Route) -> None:
+                if route.request.url == SHOP_URL:
+                    await route.fulfill(status=302, headers={"location": intermediate_url})
+                elif route.request.url in {intermediate_url, other_shop_url}:
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body=shop_html([]),
+                    )
+                else:
+                    await route.abort()
+
+            await page.context.route("**/*", route_request)
+            try:
+                with pytest.raises(SiteNavigationError):
+                    await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(config())
+
+                other_monitor = MonitorConfig.model_validate(
+                    {
+                        "id": "other",
+                        "name": "Other",
+                        "url": other_shop_url,
+                        "categories": [CATEGORY],
+                    }
+                )
+                observations = await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(
+                    other_monitor
+                )
+                assert tuple(observations) == (CATEGORY,)
+            finally:
+                await browser.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "popup_url",
+    [
+        "https://evil.example/popup",
+        "http://127.0.0.1/popup",
+    ],
+)
+def test_context_guard_aborts_popup_first_navigation_before_existing_route(
+    popup_url: str,
+) -> None:
+    observed_requests: list[str] = []
+
+    async def exercise() -> None:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+            page_html = shop_html([]).replace(
+                "</body>",
+                f"""<script>window.open({json.dumps(popup_url)}, "_blank")</script></body>""",
+            )
+
+            async def route_request(route: Route) -> None:
+                observed_requests.append(route.request.url)
+                if route.request.url == SHOP_URL:
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body=page_html,
+                    )
+                else:
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body="<body>unapproved popup</body>",
+                    )
+
+            await page.context.route("**/*", route_request)
+            try:
+                await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(config())
+            finally:
+                await browser.close()
+
+    with pytest.raises(SiteNavigationError) as exc_info:
+        asyncio.run(exercise())
+
+    assert popup_url not in observed_requests
+    assert popup_url not in "".join(
+        traceback.format_exception(exc_info.type, exc_info.value, exc_info.tb)
+    )
+
+
+@pytest.mark.parametrize(
+    "subresource_url",
+    [
+        "https://evil.example/app.js",
+        "http://evil.example/app.js",
+        "https://127.0.0.1/app.js",
+        "https://10.0.0.1/app.js",
+    ],
+)
+def test_aborts_unapproved_subresource_before_existing_route_observes_it(
+    subresource_url: str,
+) -> None:
+    observed_requests: list[str] = []
+
+    async def exercise() -> None:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+            if subresource_url.startswith("http://"):
+                page_html = shop_html([]).replace(
+                    "</body>", f'<img src="{subresource_url}"></body>'
+                )
+            else:
+                page_html = shop_html([]).replace(
+                    "</head>", f'<script src="{subresource_url}"></script></head>'
+                )
+
+            async def route_request(route: Route) -> None:
+                observed_requests.append(route.request.url)
+                if route.request.url == SHOP_URL:
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body=page_html,
+                    )
+                else:
+                    await route.fulfill(
+                        status=200,
+                        content_type="application/javascript",
+                        body="",
+                    )
+
+            await page.context.route("**/*", route_request)
+            try:
+                await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(config())
+            finally:
+                await browser.close()
+
+    with pytest.raises(SiteNavigationError):
+        asyncio.run(exercise())
+
+    assert subresource_url not in observed_requests
+
+
+def test_allows_approved_default_port_https_subresource_via_existing_route() -> None:
+    subresource_url = "https://pay.ldxp.cn/app.js"
+    observed_requests: list[str] = []
+
+    async def exercise() -> None:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+
+            async def route_request(route: Route) -> None:
+                observed_requests.append(route.request.url)
+                if route.request.url == SHOP_URL:
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body=shop_html([]).replace(
+                            "</head>", f'<script src="{subresource_url}"></script></head>'
+                        ),
+                    )
+                else:
+                    await route.fulfill(
+                        status=200,
+                        content_type="application/javascript",
+                        body="",
+                    )
+
+            await page.context.route("**/*", route_request)
+            try:
+                await LdxpAdapter(page, navigation_timeout_ms=2_000).collect(config())
+            finally:
+                await browser.close()
+
+    asyncio.run(exercise())
+
+    assert subresource_url in observed_requests
 
 
 @pytest.mark.parametrize(
@@ -451,9 +694,7 @@ def test_missing_exact_category_raises_after_at_most_three_attempts() -> None:
     navigation_requests: list[str] = []
 
     with pytest.raises(CategoryNotFoundError):
-        collect(
-            fixture("missing_category.html"), [], navigation_requests=navigation_requests
-        )
+        collect(fixture("missing_category.html"), [], navigation_requests=navigation_requests)
 
     assert navigation_requests == [SHOP_URL, SHOP_URL, SHOP_URL]
 

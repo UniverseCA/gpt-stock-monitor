@@ -35,12 +35,8 @@ from gpt_stock_monitor.state import StateRepository, StateRepositoryError
 from gpt_stock_monitor.state_git import GitStateRepository
 
 _DEFAULT_CONFIG = Path("config/monitors.yaml")
-_FEISHU_WEBHOOK = re.compile(
-    r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[^\s\"'<>]+"
-)
-_FEISHU_WEBHOOK_PATH = re.compile(
-    r"^/open-apis/bot/v2/hook/(?P<token>[A-Za-z0-9_-]{16,128})$"
-)
+_FEISHU_WEBHOOK = re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[^\s\"'<>]+")
+_FEISHU_WEBHOOK_PATH = re.compile(r"^/open-apis/bot/v2/hook/(?P<token>[A-Za-z0-9_-]{16,128})$")
 _RUN_ERRORS = (
     StateRepositoryError,
     FeishuError,
@@ -73,20 +69,24 @@ async def build_production_services(
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         try:
-            page = await browser.new_page()
-            repository = GitStateRepository(
-                Path.cwd(),
-                Path(tempfile.gettempdir()) / "gpt-stock-monitor",
-            )
-            if webhook_url is None:
-                yield RuntimeServices(repository, LdxpAdapter(page), _NoopNotifier())
-            else:
-                async with httpx.AsyncClient() as client:
-                    yield RuntimeServices(
-                        repository,
-                        LdxpAdapter(page),
-                        FeishuNotifier(webhook_url, client=client),
-                    )
+            context = await browser.new_context(service_workers="block")
+            try:
+                page = await context.new_page()
+                repository = GitStateRepository(
+                    Path.cwd(),
+                    Path(tempfile.gettempdir()) / "gpt-stock-monitor",
+                )
+                if webhook_url is None:
+                    yield RuntimeServices(repository, LdxpAdapter(page), _NoopNotifier())
+                else:
+                    async with httpx.AsyncClient() as client:
+                        yield RuntimeServices(
+                            repository,
+                            LdxpAdapter(page),
+                            FeishuNotifier(webhook_url, client=client),
+                        )
+            finally:
+                await context.close()
         finally:
             await browser.close()
 
@@ -169,7 +169,8 @@ def main(
 ) -> int:
     """Run one cycle and return its process exit code."""
     arguments = _parser().parse_args(argv)
-    webhook_url = None if arguments.dry_run else os.environ.get("FEISHU_WEBHOOK_URL")
+    environment_webhook_url = os.environ.pop("FEISHU_WEBHOOK_URL", None)
+    webhook_url = None if arguments.dry_run else environment_webhook_url
     webhook_token = None
     if not arguments.dry_run and not webhook_url:
         sys.stderr.write("configuration error: FEISHU_WEBHOOK_URL is required\n")

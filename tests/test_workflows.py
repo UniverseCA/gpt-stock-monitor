@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
+PYPROJECT = ROOT / "pyproject.toml"
 APPROVED_ACTIONS: dict[str, tuple[str, str]] = {
     "actions/checkout": ("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6.0.3"),
     "actions/setup-python": ("a309ff8b426b58ec0e2a45f0f869d46889d02405", "v6.2.0"),
@@ -21,6 +23,13 @@ EXPECTED_MONITOR_JOB_ENV = {
     "GIT_COMMITTER_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
 }
 RUNNER_TMPDIR = "${{ runner.temp }}"
+PRIVILEGED_RUNTIME_SOCKETS = (
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    "/run/containerd/containerd.sock",
+    "/var/run/podman/podman.sock",
+)
+RESTRICTED_SETPRIV = "setpriv --clear-groups --no-new-privs"
 EXPECTED_INSTALL_COMMANDS = {
     "ci.yml": (
         'python -m pip install -e ".[dev]"',
@@ -134,6 +143,72 @@ def assert_install_contract(name: str, data: dict[str, Any]) -> None:
     assert install_commands == list(EXPECTED_INSTALL_COMMANDS[name])
 
 
+def assert_windows_tzdata_contract(text: str) -> None:
+    metadata = tomllib.loads(text)
+    dependencies = metadata["project"]["dependencies"]
+    expected = "tzdata; platform_system == 'Windows'"
+    assert dependencies.count(expected) == 1
+    assert all(
+        not dependency.startswith("tzdata") or dependency == expected for dependency in dependencies
+    )
+
+
+def assert_ci_egress_guard(data: dict[str, Any]) -> None:
+    steps = steps_for(data, "quality")
+    install_indexes = [
+        index
+        for index, step in enumerate(steps)
+        if step.get("run", "").strip() in EXPECTED_INSTALL_COMMANDS["ci.yml"]
+    ]
+    test_steps = [
+        (index, step)
+        for index, step in enumerate(steps)
+        if "python -m pytest -q" in step.get("run", "")
+    ]
+    assert len(test_steps) == 1
+    test_index, test_step = test_steps[0]
+    assert install_indexes and max(install_indexes) < test_index
+    assert test_step.get("shell") == "bash"
+
+    script = test_step["run"]
+    assert script.splitlines()[0] == "set -euo pipefail"
+    assert script.count("trap cleanup EXIT") == 1
+    pytest_command = f"{RESTRICTED_SETPRIV} python -m pytest -q"
+    socket_check = f'{RESTRICTED_SETPRIV} test ! -r "$socket"'
+    assert script.count(pytest_command) == 1
+    assert script.count(socket_check) == 1
+    assert script.count('for socket in "${runtime_sockets[@]}"; do') == 1
+    assert script.count('if [[ -e "$socket" ]]; then') == 1
+    script_lines = [line.strip() for line in script.splitlines()]
+    for socket in PRIVILEGED_RUNTIME_SOCKETS:
+        assert script_lines.count(socket) == 1
+    assert script.index(socket_check) < script.index(pytest_command)
+
+    for command in (
+        "sudo iptables -I OUTPUT 1 -j REJECT",
+        "sudo iptables -I OUTPUT 1 -o lo -j ACCEPT",
+        "sudo iptables -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+        "sudo ip6tables -I OUTPUT 1 -j REJECT",
+        "sudo ip6tables -I OUTPUT 1 -o lo -j ACCEPT",
+        "sudo ip6tables -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+        "sudo iptables -D OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+        "sudo iptables -D OUTPUT -o lo -j ACCEPT",
+        "sudo iptables -D OUTPUT -j REJECT",
+        "sudo ip6tables -D OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+        "sudo ip6tables -D OUTPUT -o lo -j ACCEPT",
+        "sudo ip6tables -D OUTPUT -j REJECT",
+    ):
+        assert script.count(command) == 1
+
+    for family in ("iptables", "ip6tables"):
+        reject = script.index(f"sudo {family} -I OUTPUT 1 -j REJECT")
+        loopback = script.index(f"sudo {family} -I OUTPUT 1 -o lo -j ACCEPT")
+        established = script.index(
+            f"sudo {family} -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT"
+        )
+        assert reject < loopback < established < script.index(pytest_command)
+
+
 def assert_no_force_push(data: dict[str, Any]) -> None:
     for step in all_steps(data):
         command = step.get("run", "")
@@ -168,6 +243,11 @@ def test_ci_has_read_only_permissions_and_safe_pull_request_triggers() -> None:
     assert int(job["timeout-minutes"]) > 0
 
 
+def test_windows_installs_tzdata_from_main_dependencies() -> None:
+    text = PYPROJECT.read_text(encoding="utf-8")
+    assert_windows_tzdata_contract(text)
+
+
 def test_ci_uses_python_312_pip_cache_and_expected_quality_commands() -> None:
     data, _ = load_workflow("ci.yml")
     steps = steps_for(data, "quality")
@@ -177,18 +257,33 @@ def test_ci_uses_python_312_pip_cache_and_expected_quality_commands() -> None:
 
     assert setup_python["with"] == {"python-version": "3.12", "cache": "pip"}
 
-    run_commands = [step["run"].strip() for step in steps if "run" in step]
+    run_steps = [(index, step["run"].strip()) for index, step in enumerate(steps) if "run" in step]
+    run_commands = [command for _, command in run_steps]
     assert 'python -m pip install -e ".[dev]"' in run_commands
     assert "python -m playwright install --with-deps chromium" in run_commands
     quality_commands = [
         "ruff format --check .",
         "ruff check .",
         "mypy src",
-        "pytest -q",
     ]
-    assert [run_commands.index(command) for command in quality_commands] == sorted(
-        run_commands.index(command) for command in quality_commands
+    quality_indexes = [
+        next(index for index, run in run_steps if run == command) for command in quality_commands
+    ]
+    pytest_index = next(
+        index for index, run in run_steps if f"{RESTRICTED_SETPRIV} python -m pytest -q" in run
     )
+    assert [*quality_indexes, pytest_index] == sorted([*quality_indexes, pytest_index])
+
+
+def test_ci_checkout_drops_credentials_and_pytest_has_os_egress_guard() -> None:
+    data, _ = load_workflow("ci.yml")
+    checkout = next(
+        step
+        for step in steps_for(data, "quality")
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    assert checkout.get("with") == {"persist-credentials": "false"}
+    assert_ci_egress_guard(data)
 
 
 def test_workflows_install_only_through_approved_python_and_playwright_paths() -> None:
@@ -222,9 +317,12 @@ def test_monitor_job_is_bounded_and_uses_isolated_temp_state_and_bot_identity() 
 
     assert job["runs-on"] == "ubuntu-latest"
     assert int(job["timeout-minutes"]) > 0
+    assert job["environment"] == "monitor-production"
     assert job["env"] == EXPECTED_MONITOR_JOB_ENV
 
     steps = steps_for(data, "monitor")
+    checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout.get("with", {}).get("persist-credentials", "true") == "true"
     setup_python = next(
         step for step in steps if step.get("uses", "").startswith("actions/setup-python@")
     )
@@ -232,6 +330,52 @@ def test_monitor_job_is_bounded_and_uses_isolated_temp_state_and_bot_identity() 
     run_commands = [step["run"].strip() for step in steps if "run" in step]
     assert "python -m pip install ." in run_commands
     assert "python -m playwright install --with-deps chromium" in run_commands
+
+
+def test_static_security_contracts_reject_metadata_and_workflow_mutants() -> None:
+    pyproject_text = PYPROJECT.read_text(encoding="utf-8")
+    with pytest.raises(AssertionError):
+        assert_windows_tzdata_contract(
+            pyproject_text.replace("tzdata; platform_system == 'Windows'", "tzdata", 1)
+        )
+
+    ci_data, ci_text = load_workflow("ci.yml")
+    assert_ci_egress_guard(ci_data)
+    mutations = (
+        ("sudo ip6tables -I OUTPUT 1 -j REJECT", "true"),
+        ("-o lo -j ACCEPT", "-o eth0 -j ACCEPT"),
+        ("--ctstate ESTABLISHED", "--ctstate NEW"),
+        ("-j REJECT", "-j DROP"),
+        (f"{RESTRICTED_SETPRIV} python -m pytest -q", "python -m pytest -q"),
+        ("trap cleanup EXIT", "true"),
+        ("sudo iptables -D OUTPUT -j REJECT", "true"),
+    )
+    for original, replacement in mutations:
+        mutant = ci_text.replace(original, replacement, 1)
+        with pytest.raises(AssertionError):
+            assert_ci_egress_guard(yaml.load(mutant, Loader=yaml.BaseLoader))
+
+
+def test_ci_runtime_socket_contract_rejects_clear_group_path_and_order_mutants() -> None:
+    data, text = load_workflow("ci.yml")
+    assert_ci_egress_guard(data)
+    socket_check = f'{RESTRICTED_SETPRIV} test ! -r "$socket"'
+    pytest_command = f"{RESTRICTED_SETPRIV} python -m pytest -q"
+    mutations = [
+        text.replace(socket_check, 'setpriv --no-new-privs test ! -r "$socket"', 1),
+        text.replace(pytest_command, "setpriv --no-new-privs python -m pytest -q", 1),
+        text.replace(socket_check, "true", 1),
+        text.replace(socket_check, "__SOCKET_CHECK__", 1)
+        .replace(pytest_command, socket_check, 1)
+        .replace("__SOCKET_CHECK__", pytest_command, 1),
+    ]
+    mutations.extend(
+        text.replace(f"            {socket}\n", "            /missing.sock\n", 1)
+        for socket in PRIVILEGED_RUNTIME_SOCKETS
+    )
+    for mutant in mutations:
+        with pytest.raises(AssertionError):
+            assert_ci_egress_guard(yaml.load(mutant, Loader=yaml.BaseLoader))
 
 
 def test_monitor_executes_exactly_one_of_live_and_dry_run_commands() -> None:

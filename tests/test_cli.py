@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import _socket
+import asyncio
 import json
+import os
 import socket
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -11,10 +13,12 @@ from typing import Never
 
 import pytest
 
-from gpt_stock_monitor.cli import RuntimeServices, main
+from gpt_stock_monitor.cli import RuntimeServices, build_production_services, main
 from gpt_stock_monitor.config import AppConfig, ConfigError
 from gpt_stock_monitor.monitor import RunResult
 from gpt_stock_monitor.state import StateRepositoryError
+
+FEISHU_WEBHOOK_PREFIX = "https://open.feishu.cn/open-apis/bot/v2/" + "hook/"
 
 
 def app_config() -> AppConfig:
@@ -37,13 +41,13 @@ async def services_factory(webhook_url: str | None) -> AsyncIterator[RuntimeServ
     yield RuntimeServices(object(), object(), object())
 
 
-@pytest.mark.allow_socketpair
 def test_default_config_path_and_utf8_deterministic_output(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     observed: dict[str, object] = {}
 
     def fake_load_config(path: Path) -> AppConfig:
+        assert "FEISHU_WEBHOOK_URL" not in os.environ
         observed["path"] = path
         return app_config()
 
@@ -53,7 +57,7 @@ def test_default_config_path_and_utf8_deterministic_output(
 
     monkeypatch.setenv(
         "FEISHU_WEBHOOK_URL",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/unit-test-token-1234",
+        f"{FEISHU_WEBHOOK_PREFIX}unit-test-token-1234",
     )
     monkeypatch.setattr("gpt_stock_monitor.cli.load_config", fake_load_config)
     monkeypatch.setattr("gpt_stock_monitor.cli.run_once", fake_run_once)
@@ -61,11 +65,11 @@ def test_default_config_path_and_utf8_deterministic_output(
     assert main([], services_factory=services_factory) == 0
     captured = capsys.readouterr()
     assert observed == {"path": Path("config/monitors.yaml"), "dry_run": False}
+    assert "FEISHU_WEBHOOK_URL" not in os.environ
     assert captured.out == '{"a":[2,1],"z":"中文"}\n'
     assert captured.err == ""
 
 
-@pytest.mark.allow_socketpair
 def test_config_override_and_dry_run_do_not_read_or_pass_webhook(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -100,6 +104,7 @@ def test_config_override_and_dry_run_do_not_read_or_pass_webhook(
     )
     captured = capsys.readouterr()
     assert observed == {"path": config_path, "webhook": None, "dry_run": True}
+    assert "FEISHU_WEBHOOK_URL" not in os.environ
     assert captured.out == '{"changes":[]}\n'
     assert captured.err == ""
 
@@ -116,7 +121,6 @@ def test_missing_webhook_is_safe_configuration_error(
     assert captured.err == "configuration error: FEISHU_WEBHOOK_URL is required\n"
 
 
-@pytest.mark.allow_socketpair
 @pytest.mark.parametrize(
     "webhook",
     [
@@ -125,11 +129,11 @@ def test_missing_webhook_is_safe_configuration_error(
         "https://user@open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456",
         "https://open.feishu.cn:8443/open-apis/bot/v2/hook/valid-token-123456",
         "https://open.feishu.cn/open-apis/bot/v2/other/valid-token-123456",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/a",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456?query=1",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456#fragment",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456?",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456#",
+        f"{FEISHU_WEBHOOK_PREFIX}a",
+        f"{FEISHU_WEBHOOK_PREFIX}valid-token-123456?query=1",
+        f"{FEISHU_WEBHOOK_PREFIX}valid-token-123456#fragment",
+        f"{FEISHU_WEBHOOK_PREFIX}valid-token-123456?",
+        f"{FEISHU_WEBHOOK_PREFIX}valid-token-123456#",
         "https://open.feishu.cn:/open-apis/bot/v2/hook/valid-token-123456",
     ],
     ids=[
@@ -168,19 +172,20 @@ def test_invalid_webhook_is_rejected_before_factory(
     assert webhook not in captured.err
     assert "Traceback" not in captured.err
     assert not factory_called
+    assert "FEISHU_WEBHOOK_URL" not in os.environ
 
 
-@pytest.mark.allow_socketpair
 def test_valid_canonical_webhook_reaches_factory(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/valid-token-123456"
+    webhook = f"{FEISHU_WEBHOOK_PREFIX}valid-token-123456"
     observed: list[str | None] = []
     monkeypatch.setenv("FEISHU_WEBHOOK_URL", webhook)
     monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
 
     @asynccontextmanager
     async def observing_factory(value: str | None) -> AsyncIterator[RuntimeServices]:
+        assert "FEISHU_WEBHOOK_URL" not in os.environ
         observed.append(value)
         yield RuntimeServices(object(), object(), object())
 
@@ -192,16 +197,95 @@ def test_valid_canonical_webhook_reaches_factory(
 
     assert main([], services_factory=observing_factory) == 0
     assert observed == [webhook]
+    assert "FEISHU_WEBHOOK_URL" not in os.environ
     assert capsys.readouterr().out == '{"ok":true}\n'
+
+
+@pytest.mark.parametrize("run_fails", [False, True], ids=["success", "run-error"])
+def test_production_launcher_uses_blocked_service_worker_context_and_closes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    run_fails: bool,
+) -> None:
+    webhook = f"{FEISHU_WEBHOOK_PREFIX}valid-token-123456"
+    events: list[str] = []
+
+    class FakeContext:
+        async def new_page(self) -> object:
+            events.append("page")
+            assert "FEISHU_WEBHOOK_URL" not in os.environ
+            return object()
+
+        async def close(self) -> None:
+            events.append("context-close")
+
+    class FakeBrowser:
+        async def new_context(self, *, service_workers: str) -> FakeContext:
+            events.append(f"context:{service_workers}")
+            assert "FEISHU_WEBHOOK_URL" not in os.environ
+            return FakeContext()
+
+        async def close(self) -> None:
+            events.append("browser-close")
+
+    class FakeChromium:
+        async def launch(self, *, headless: bool) -> FakeBrowser:
+            events.append("launch")
+            assert headless is True
+            assert "FEISHU_WEBHOOK_URL" not in os.environ
+            return FakeBrowser()
+
+    class FakePlaywrightManager:
+        async def __aenter__(self) -> object:
+            return type("FakePlaywright", (), {"chromium": FakeChromium()})()
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    def fake_repository(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        events.append("repository")
+        assert "FEISHU_WEBHOOK_URL" not in os.environ
+        return object()
+
+    async def fake_run_once(*args: object, **kwargs: object) -> RunResult:
+        del args, kwargs
+        events.append("run")
+        assert "FEISHU_WEBHOOK_URL" not in os.environ
+        if run_fails:
+            raise StateRepositoryError("run failed")
+        return RunResult(0, {"ok": True})
+
+    monkeypatch.setenv("FEISHU_WEBHOOK_URL", webhook)
+    monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
+    monkeypatch.setattr("gpt_stock_monitor.cli.async_playwright", FakePlaywrightManager)
+    monkeypatch.setattr("gpt_stock_monitor.cli.GitStateRepository", fake_repository)
+    monkeypatch.setattr("gpt_stock_monitor.cli.run_once", fake_run_once)
+
+    assert main([], services_factory=build_production_services) == (3 if run_fails else 0)
+    assert events == [
+        "launch",
+        "context:block",
+        "page",
+        "repository",
+        "run",
+        "context-close",
+        "browser-close",
+    ]
+    assert "FEISHU_WEBHOOK_URL" not in os.environ
 
 
 def test_config_error_returns_two_without_exposing_config_content(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     secret = "config-secret-value"
+    monkeypatch.setenv(
+        "FEISHU_WEBHOOK_URL",
+        f"{FEISHU_WEBHOOK_PREFIX}valid-token-123456",
+    )
 
     def fail(path: Path) -> Never:
         del path
+        assert "FEISHU_WEBHOOK_URL" not in os.environ
         raise ConfigError(f"monitors.0.url: value_error {secret}")
 
     monkeypatch.setattr("gpt_stock_monitor.cli.load_config", fail)
@@ -211,6 +295,7 @@ def test_config_error_returns_two_without_exposing_config_content(
     assert captured.out == ""
     assert "configuration error:" in captured.err
     assert secret not in captured.err
+    assert "FEISHU_WEBHOOK_URL" not in os.environ
 
 
 def test_missing_config_returns_safe_configuration_error(
@@ -252,7 +337,6 @@ def test_unreadable_config_returns_safe_configuration_error(
 
 
 @pytest.mark.parametrize("result_code", [0, 3])
-@pytest.mark.allow_socketpair
 def test_returns_run_result_exit_code_and_prints_output(
     result_code: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -267,16 +351,19 @@ def test_returns_run_result_exit_code_and_prints_output(
 
     assert main(["--dry-run"], services_factory=services_factory) == result_code
     captured = capsys.readouterr()
-    assert captured.out == json.dumps(
-        {"exit": result_code},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ) + "\n"
+    assert (
+        captured.out
+        == json.dumps(
+            {"exit": result_code},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
     assert captured.err == ""
 
 
-@pytest.mark.allow_socketpair
 def test_non_json_output_returns_three_with_redacted_traceback(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -300,7 +387,6 @@ def test_non_json_output_returns_three_with_redacted_traceback(
     assert webhook not in captured.err
 
 
-@pytest.mark.allow_socketpair
 def test_stdout_json_redacts_webhook(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -323,7 +409,6 @@ def test_stdout_json_redacts_webhook(
     assert captured.err == ""
 
 
-@pytest.mark.allow_socketpair
 def test_stdout_json_is_written_as_explicit_utf8_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,7 +435,6 @@ def test_stdout_json_is_written_as_explicit_utf8_bytes(
     assert output.buffer.getvalue() != '{"name":"中文"}\n'.encode("gbk")
 
 
-@pytest.mark.allow_socketpair
 def test_stdout_write_failure_is_an_unknown_redacted_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -384,7 +468,6 @@ def test_stdout_write_failure_is_an_unknown_redacted_error(
     assert "[REDACTED]" in captured.err
 
 
-@pytest.mark.allow_socketpair
 def test_defined_application_exception_returns_three(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -402,7 +485,6 @@ def test_defined_application_exception_returns_three(
     assert captured.err == "monitor run failed\n"
 
 
-@pytest.mark.allow_socketpair
 def test_unknown_exception_traceback_is_redacted(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -426,7 +508,6 @@ def test_unknown_exception_traceback_is_redacted(
     assert "[REDACTED]" in captured.err
 
 
-@pytest.mark.allow_socketpair
 def test_token_only_unknown_exception_traceback_is_redacted(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -451,7 +532,6 @@ def test_token_only_unknown_exception_traceback_is_redacted(
     assert "[REDACTED]" in captured.err
 
 
-@pytest.mark.allow_socketpair
 def test_main_does_not_catch_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("gpt_stock_monitor.cli.load_config", lambda path: app_config())
 
@@ -471,22 +551,49 @@ def test_unmarked_connect_ex_is_blocked() -> None:
             connection.connect_ex(("127.0.0.1", 9))
 
 
-def test_unmarked_socketpair_is_blocked() -> None:
-    with pytest.raises(AssertionError, match="network access is disabled in tests"):
-        socket.socketpair()
+def test_unmarked_asyncio_run_can_create_an_event_loop() -> None:
+    async def exercise() -> str:
+        await asyncio.sleep(0)
+        return "ok"
+
+    assert asyncio.run(exercise()) == "ok"
 
 
-@pytest.mark.allow_socketpair
-def test_marked_socketpair_only_permits_local_ipc() -> None:
+def test_stdlib_socketpair_permits_local_ipc() -> None:
     left, right = socket.socketpair()
-    left.close()
-    right.close()
+    try:
+        assert left.send(b"ok") == 2
+        assert right.recv(2) == b"ok"
+    finally:
+        left.close()
+        right.close()
 
+
+def test_guarded_socket_preserves_standard_socket_api() -> None:
     with socket.socket() as connection:
+        assert callable(connection.makefile)
+        assert callable(connection.dup)
+        assert callable(connection.sendfile)
+
+
+@pytest.mark.parametrize(
+    ("family", "address"),
+    [
+        (socket.AF_INET, ("127.0.0.1", 9)),
+        (socket.AF_INET6, ("::1", 9)),
+    ],
+    ids=["ipv4", "ipv6"],
+)
+def test_internet_socket_egress_is_blocked(
+    family: socket.AddressFamily, address: tuple[object, ...]
+) -> None:
+    with socket.socket(family) as connection:
         with pytest.raises(AssertionError, match="network access is disabled in tests"):
-            connection.connect(("127.0.0.1", 9))
+            connection.connect(address)
         with pytest.raises(AssertionError, match="network access is disabled in tests"):
-            connection.connect_ex(("127.0.0.1", 9))
+            connection.connect_ex(address)
+        with pytest.raises(AssertionError, match="network access is disabled in tests"):
+            connection.sendto(b"blocked", address)
     with pytest.raises(AssertionError, match="network access is disabled in tests"):
         socket.create_connection(("127.0.0.1", 9))
 

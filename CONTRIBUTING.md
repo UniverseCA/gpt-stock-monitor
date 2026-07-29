@@ -42,6 +42,8 @@ python -m pytest -q
 ## 测试与安全
 
 - 测试必须禁真实网络：使用 `tests/fixtures`、fake adapter、临时 Git 仓库和 HTTP mock。
+- CI 会在依赖和 Chromium 安装后启用操作系统级 IPv4/IPv6 出站保护，只允许 loopback 和已有连接，再以 `no-new-privs` 运行 pytest。
+- 本地测试必须保持离线；Playwright 用例应通过 `page.route` 提供样本。Python fixture 或 mock 本身不能单独阻止测试启动的子进程访问网络。
 - 禁止在测试、提交、日志、Issue 或截图中使用真实 Secret、Cookie、token 或飞书 Webhook。
 - 示例只能使用变量名或明显占位符，不要使用形似真实 token 的值。
 - 浏览器采集必须保持普通 Playwright 行为；不得增加隐身、指纹伪装、验证码破解或绕过逻辑。
