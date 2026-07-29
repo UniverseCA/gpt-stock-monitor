@@ -66,6 +66,29 @@ def repository(repo: Path, temp_root: Path) -> GitStateRepository:
     return GitStateRepository(repo_path=repo, temp_root=temp_root)
 
 
+@pytest.mark.parametrize("remote", ["--all", "-f", "..", ".", ""])
+def test_repository_rejects_unsafe_remote_names(tmp_path: Path, remote: str) -> None:
+    with pytest.raises(ValueError, match=r"^invalid state git name$"):
+        GitStateRepository(tmp_path, tmp_path / "worktrees", remote=remote)
+
+
+@pytest.mark.parametrize("branch", ["--all", "-f", "..", ".", "", "heads/state"])
+def test_repository_rejects_unsafe_branch_names(tmp_path: Path, branch: str) -> None:
+    with pytest.raises(ValueError, match=r"^invalid state git name$"):
+        GitStateRepository(tmp_path, tmp_path / "worktrees", branch=branch)
+
+
+@pytest.mark.parametrize(
+    "state_filename",
+    ["--state.json", "-f", "..", ".", "", "../state.json", "nested/state.json"],
+)
+def test_repository_rejects_unsafe_state_filenames(
+    tmp_path: Path, state_filename: str
+) -> None:
+    with pytest.raises(ValueError, match=r"^invalid state filename$"):
+        GitStateRepository(tmp_path, tmp_path / "worktrees", state_filename=state_filename)
+
+
 def test_load_returns_unversioned_empty_state_when_remote_branch_is_absent(
     repositories: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
@@ -248,6 +271,74 @@ def test_rejected_push_becomes_conflict_with_latest_remote_version(
     assert result == PublishResult(PublishStatus.CONFLICT, winner_version)
     assert first_repo.load() == VersionedState(winner_version, populated_state("winner"))
 
+
+@pytest.mark.parametrize("remote_change", ["delete", "rollback"])
+def test_exact_lease_rejects_remote_deletion_or_rollback_during_publish(
+    repositories: tuple[Path, Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remote_change: str,
+) -> None:
+    _, first, second = repositories
+    repo = repository(first, tmp_path / "worktrees")
+    ancestor = repo.publish(None, populated_state("ancestor"), "ancestor")
+    assert ancestor.remote_version is not None
+    if remote_change == "rollback":
+        expected = repo.publish(
+            ancestor.remote_version, populated_state("expected"), "expected"
+        ).remote_version
+        latest_after_race = ancestor.remote_version
+    else:
+        expected = ancestor.remote_version
+        latest_after_race = None
+    assert expected is not None
+    assert git(second, "fetch", "origin").returncode == 0
+    real_run = subprocess.run
+    push_command: list[str] | None = None
+
+    def change_remote_at_push(
+        args: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal push_command
+        if args[1:2] == ["push"] and push_command is None:
+            push_command = args
+            if remote_change == "delete":
+                race_args = ["git", "push", "origin", "--delete", "monitor-state"]
+            else:
+                race_args = [
+                    "git",
+                    "push",
+                    "--force",
+                    "origin",
+                    f"{ancestor.remote_version}:refs/heads/monitor-state",
+                ]
+            raced = real_run(
+                race_args,
+                cwd=second,
+                check=False,
+                shell=False,
+                text=True,
+                capture_output=True,
+            )
+            assert raced.returncode == 0
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("gpt_stock_monitor.state_git.subprocess.run", change_remote_at_push)
+
+    result = repo.publish(expected, populated_state("candidate"), "candidate")
+
+    assert result == PublishResult(PublishStatus.CONFLICT, latest_after_race)
+    assert push_command is not None
+    exact_lease = f"--force-with-lease=refs/heads/monitor-state:{expected}"
+    lease_arguments = [
+        argument for argument in push_command if argument.startswith("--force-with-lease=")
+    ]
+    assert lease_arguments == [exact_lease]
+    assert "--force" not in push_command
+    assert "-f" not in push_command
+    assert not any(argument.startswith("+") for argument in push_command)
+
+
 def test_git_commands_use_safe_subprocess_contract_and_do_not_contain_remote_secret(
     repositories: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -277,6 +368,11 @@ def test_git_commands_use_safe_subprocess_contract_and_do_not_contain_remote_sec
     assert commit_env["GIT_AUTHOR_EMAIL"] == BOT_EMAIL
     assert commit_env["GIT_COMMITTER_NAME"] == BOT_NAME
     assert commit_env["GIT_COMMITTER_EMAIL"] == BOT_EMAIL
+    push_call = next(item[0] for item in calls if item[0][1:2] == ["push"])
+    assert "--force-with-lease=refs/heads/monitor-state:" in push_call
+    assert "--force" not in push_call
+    assert "-f" not in push_call
+    assert not any(argument.startswith("+") for argument in push_call)
 
 
 def test_failure_uses_fixed_safe_error_without_git_output(
@@ -356,6 +452,90 @@ def test_candidate_is_safely_cleaned_when_preparing_worktree_path_fails(
     assert git(first, "worktree", "list", "--porcelain").stdout == worktrees_before
     assert git(first, "rev-parse", "HEAD").stdout.strip() == head_before
     assert git(first, "status", "--porcelain").stdout == status_before
+
+
+def test_cleanup_retries_a_failed_worktree_remove_and_clears_registration(
+    repositories: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, first, _ = repositories
+    temp_root = tmp_path / "worktrees"
+    worktrees_before = git(first, "worktree", "list", "--porcelain").stdout
+    real_run = subprocess.run
+    remove_calls = 0
+
+    def fail_first_remove(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal remove_calls
+        if args[1:3] == ["worktree", "remove"]:
+            remove_calls += 1
+            if remove_calls == 1:
+                return subprocess.CompletedProcess(args, 1, "", "secret-token")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("gpt_stock_monitor.state_git.subprocess.run", fail_first_remove)
+
+    result = repository(first, temp_root).publish(None, populated_state("state"), "publish")
+
+    assert result.status is PublishStatus.PUBLISHED
+    assert remove_calls == 2
+    assert list(temp_root.iterdir()) == []
+    assert git(first, "worktree", "list", "--porcelain").stdout == worktrees_before
+
+
+def test_cleanup_failure_is_reported_when_both_remove_attempts_fail(
+    repositories: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, first, _ = repositories
+    real_run = subprocess.run
+    remove_calls = 0
+
+    def fail_remove(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal remove_calls
+        if args[1:3] == ["worktree", "remove"]:
+            remove_calls += 1
+            return subprocess.CompletedProcess(args, 1, "", "secret-token")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("gpt_stock_monitor.state_git.subprocess.run", fail_remove)
+
+    with pytest.raises(StateGitError, match=r"^state git cleanup failed$") as caught:
+        repository(first, tmp_path / "worktrees").publish(
+            None, populated_state("state"), "publish"
+        )
+
+    assert remove_calls == 2
+    assert "secret-token" not in str(caught.value)
+
+
+def test_cleanup_failure_does_not_mask_an_existing_publication_error(
+    repositories: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class PublicationSentinel(Exception):
+        pass
+
+    _, first, _ = repositories
+    real_run = subprocess.run
+    remove_calls = 0
+
+    def fail_remove(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal remove_calls
+        if args[1:3] == ["worktree", "remove"]:
+            remove_calls += 1
+            return subprocess.CompletedProcess(args, 1, "", "secret-token")
+        return real_run(args, **kwargs)
+
+    def fail_write(path: Path, state: StateDocument) -> None:
+        del path, state
+        raise PublicationSentinel("primary")
+
+    monkeypatch.setattr("gpt_stock_monitor.state_git.subprocess.run", fail_remove)
+    monkeypatch.setattr("gpt_stock_monitor.state_git.write_state_atomic", fail_write)
+
+    with pytest.raises(PublicationSentinel, match=r"^primary$"):
+        repository(first, tmp_path / "worktrees").publish(
+            None, populated_state("state"), "publish"
+        )
+
+    assert remove_calls == 2
 
 
 def test_load_prunes_a_remote_tracking_branch_deleted_from_the_remote(

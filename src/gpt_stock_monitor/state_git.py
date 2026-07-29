@@ -24,7 +24,7 @@ __all__ = ["GitStateRepository", "StateGitError"]
 
 _BOT_NAME = "github-actions[bot]"
 _BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
-_SAFE_GIT_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+_SAFE_GIT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class StateGitError(RuntimeError):
@@ -45,7 +45,11 @@ class GitStateRepository(StateRepository):
         if not _SAFE_GIT_NAME.fullmatch(remote) or not _SAFE_GIT_NAME.fullmatch(branch):
             raise ValueError("invalid state git name")
         filename = Path(state_filename)
-        if filename.is_absolute() or filename.name != state_filename:
+        if (
+            filename.is_absolute()
+            or filename.name != state_filename
+            or not _SAFE_GIT_NAME.fullmatch(state_filename)
+        ):
             raise ValueError("invalid state filename")
         self._repo_path = repo_path.resolve()
         self._temp_root = temp_root.resolve()
@@ -103,8 +107,12 @@ class GitStateRepository(StateRepository):
                 self._git("rev-parse", "HEAD", cwd=worktree),
                 "state git revision failed",
             ).stdout.strip()
+            # This exact lease is the server-side CAS guard, not an unconditional
+            # force push. When present, expected_parent is also the new commit's parent.
+            lease_expected = expected_parent or ""
             pushed = self._git(
                 "push",
+                f"--force-with-lease=refs/heads/{self._branch}:{lease_expected}",
                 self._remote,
                 f"HEAD:refs/heads/{self._branch}",
                 cwd=worktree,
@@ -225,32 +233,60 @@ class _TemporaryWorktree:
                 cwd=repository._repo_path,
             )
         if result.returncode != 0:
-            self._cleanup()
+            try:
+                self._cleanup()
+            except StateGitError:
+                pass
             raise StateGitError("state git worktree failed")
         return temporary
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
-        del exc_type, exc_value, traceback
+        del exc_type, traceback
         if self.path is None:
             return
-        self._cleanup()
+        try:
+            self._cleanup()
+        except StateGitError:
+            if exc_value is None:
+                raise
 
     def _cleanup(self) -> None:
         if self.path is None:
             return
         repository = self._repository
-        path = self.path.resolve()
+        try:
+            path = self.path.resolve()
+        except OSError:
+            raise StateGitError("state git cleanup failed") from None
         if not path.is_relative_to(repository._temp_root) or path == repository._temp_root:
-            raise StateGitError("state git cleanup path failed")
-        repository._git(
+            raise StateGitError("state git cleanup failed")
+        removed = repository._git(
             "worktree",
             "remove",
             "--force",
             str(path),
             cwd=repository._repo_path,
         )
-        if path.exists():
-            shutil.rmtree(path)
+        if removed.returncode != 0:
+            removed = repository._git(
+                "worktree",
+                "remove",
+                "--force",
+                str(path),
+                cwd=repository._repo_path,
+            )
+        if removed.returncode != 0:
+            self._remove_candidate_directory(path)
+            raise StateGitError("state git cleanup failed")
+        self._remove_candidate_directory(path)
+
+    @staticmethod
+    def _remove_candidate_directory(path: Path) -> None:
+        try:
+            if path.exists():
+                shutil.rmtree(path)
+        except OSError:
+            raise StateGitError("state git cleanup failed") from None
 
     def _discard_unregistered_candidate(self) -> None:
         if self.path is None:
