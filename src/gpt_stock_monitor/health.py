@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -23,6 +25,18 @@ __all__ = [
     "record_failure",
     "record_success",
 ]
+
+_MAX_REASON_LENGTH = 240
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+_AUTHORIZATION_PATTERN = re.compile(
+    r"\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+    re.IGNORECASE,
+)
+_SECRET_VALUE_PATTERN = re.compile(
+    r"\b([a-z0-9_-]*(?:cookie|password|passwd|token|secret)|api[_-]?key)"
+    r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
 
 
 class HealthEventKind(StrEnum):
@@ -78,6 +92,24 @@ def _should_notify_failure(count: int) -> bool:
     return count in {1, 3} or (count >= 12 and count % 12 == 0)
 
 
+def _sanitize_reason(reason: str) -> str:
+    text = str(reason)
+    text = "".join(
+        " " if unicodedata.category(character).startswith("C") else character
+        for character in text
+    )
+    text = " ".join(text.split())
+    text = _URL_PATTERN.sub("<url>", text)
+    text = _AUTHORIZATION_PATTERN.sub("authorization=<redacted>", text)
+    text = _SECRET_VALUE_PATTERN.sub(
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
+    if len(text) > _MAX_REASON_LENGTH:
+        text = f"{text[: _MAX_REASON_LENGTH - 3].rstrip()}..."
+    return text
+
+
 def record_failure(state: StateDocument, key: str, reason: str) -> Transition:
     """Record one category failure and emit only scheduled reminders."""
     _scope_from_key(key)
@@ -90,7 +122,7 @@ def record_failure(state: StateDocument, key: str, reason: str) -> Transition:
     previous = state.health.get(key)
     count = 1 if previous is None else previous.consecutive_failures + 1
     notify = _should_notify_failure(count)
-    safe_reason = str(reason)
+    safe_reason = _sanitize_reason(reason)
     health[key] = HealthRecord(
         consecutive_failures=count,
         last_error=safe_reason,

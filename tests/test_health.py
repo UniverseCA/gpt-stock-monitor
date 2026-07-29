@@ -25,6 +25,7 @@ from gpt_stock_monitor.models import (
     StateDocument,
     state_key,
 )
+from gpt_stock_monitor.state import serialize_state
 
 
 def make_product(key: str = "product-1", *, name: str = "GPT Plus") -> Product:
@@ -142,6 +143,90 @@ def test_record_failure_converts_reason_once_for_consistent_pure_data() -> None:
     assert transition.state.health[key].last_error == "safe reason 1"
     assert transition.events[0].reason == "safe reason 1"  # type: ignore[union-attr]
     assert reason.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("reason", "sentinel"),
+    [
+        (
+            "site navigation failed at "
+            "https://open.feishu.cn/open-apis/bot/v2/hook/SENTINEL-WEBHOOK",
+            "SENTINEL-WEBHOOK",
+        ),
+        ("site navigation failed; Authorization: Bearer SENTINEL-AUTH", "SENTINEL-AUTH"),
+        ("site navigation failed; Cookie=session=SENTINEL-COOKIE", "SENTINEL-COOKIE"),
+        ("site navigation failed; password=SENTINEL-PASSWORD", "SENTINEL-PASSWORD"),
+        ("site navigation failed; ToKeN: SENTINEL-TOKEN", "SENTINEL-TOKEN"),
+        ("site navigation failed; secret = SENTINEL-SECRET", "SENTINEL-SECRET"),
+        ("site navigation failed; client_secret=SENTINEL-CLIENT", "SENTINEL-CLIENT"),
+    ],
+    ids=["url", "authorization", "cookie", "password", "token", "secret", "prefixed-secret"],
+)
+def test_record_failure_redacts_sensitive_reason_values(reason: str, sentinel: str) -> None:
+    key = state_key("demo", "GPT Plus")
+
+    transition = record_failure(StateDocument(), key, reason)
+    stored_reason = transition.state.health[key].last_error
+    event_reason = transition.events[0].reason  # type: ignore[union-attr]
+
+    assert stored_reason == event_reason
+    assert stored_reason is not None
+    assert sentinel not in stored_reason
+    assert "site navigation failed" in stored_reason
+
+
+def test_record_failure_has_safe_bounded_reason_on_all_transition_surfaces() -> None:
+    key = state_key("demo", "GPT Plus")
+    sentinels = (
+        "SENTINEL-WEBHOOK",
+        "SENTINEL-AUTH",
+        "SENTINEL-COOKIE",
+        "SENTINEL-PASSWORD",
+        "SENTINEL-TOKEN",
+        "SENTINEL-SECRET",
+    )
+    webhook_url = (
+        "https://open.feishu.cn/open-apis/bot/v2/hook/SENTINEL-WEBHOOK"
+    )
+    reason = (
+        "site navigation failed\r\nforged log entry "
+        f"{webhook_url} "
+        "Authorization: Bearer SENTINEL-AUTH; "
+        "Cookie=session=SENTINEL-COOKIE; "
+        "password=SENTINEL-PASSWORD; token: SENTINEL-TOKEN; "
+        "secret = SENTINEL-SECRET; "
+        f"details={'x' * 1000}"
+    )
+
+    transition = record_failure(StateDocument(), key, reason)
+    stored_reason = transition.state.health[key].last_error
+    event_reason = transition.events[0].reason  # type: ignore[union-attr]
+    serialized_state = serialize_state(transition.state).decode()
+    text_surfaces = (
+        str(transition.events),
+        repr(transition.events),
+        str(transition),
+        repr(transition),
+    )
+    surfaces = (
+        serialized_state,
+        transition.state.model_dump_json(),
+        *text_surfaces,
+    )
+
+    assert stored_reason == event_reason
+    assert stored_reason is not None
+    assert "site navigation failed" in stored_reason
+    assert "<url>" in stored_reason
+    assert "\r" not in stored_reason
+    assert "\n" not in stored_reason
+    assert len(stored_reason) <= 240
+    assert "\\r" not in serialized_state
+    assert "\\nforged" not in serialized_state
+    assert all("\r" not in surface and "\n" not in surface for surface in text_surfaces)
+    for surface in surfaces:
+        assert webhook_url not in surface
+        assert all(sentinel not in surface for sentinel in sentinels)
 
 
 def test_record_success_is_silent_without_failures_and_preserves_other_state() -> None:
