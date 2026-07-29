@@ -3,29 +3,51 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Any, Self
 from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import (
+    AfterValidator,
     AnyHttpUrl,
     BaseModel,
     ConfigDict,
     Field,
     StringConstraints,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
 
-NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+def _contains_control_character(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
+def _reject_control_characters(value: str) -> str:
+    if _contains_control_character(value):
+        raise ValueError("value must not contain control characters")
+    return value
+
+
+NonEmptyStr = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1),
+    AfterValidator(_reject_control_characters),
+]
 SHOP_PATH = re.compile(r"^/shop/(?P<shop_id>[A-Za-z0-9_-]+)$")
 URL_ADAPTER = TypeAdapter(AnyHttpUrl)
 
 
+class ConfigError(ValueError):
+    """A configuration error safe to expose without leaking input values."""
+
+
 def _shop_id_from_url(value: str) -> str:
-    if any(control in value for control in "\t\r\n"):
+    if _contains_control_character(value):
         raise ValueError("shop URL must not contain control characters")
 
     parse_failed = False
@@ -99,7 +121,7 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    monitors: tuple[MonitorConfig, ...]
+    monitors: tuple[MonitorConfig, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def reject_duplicate_monitor_ids(self) -> Self:
@@ -111,11 +133,31 @@ class AppConfig(BaseModel):
 
 def load_config(path: Path) -> AppConfig:
     """Read a UTF-8 YAML configuration file and validate its structure."""
+    yaml_error = False
     try:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
-        raise ValueError("invalid YAML configuration") from None
+        yaml_error = True
+    if yaml_error:
+        raise ConfigError("yaml: parse_error")
 
     if not isinstance(document, dict):
-        raise ValueError("configuration document must be a mapping")
-    return AppConfig.model_validate(document)
+        document = None
+        raise ConfigError("document: mapping_type (configuration document must be a mapping)")
+
+    config = None
+    error_summary = None
+    try:
+        config = AppConfig.model_validate(document)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        error_summary = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['type']}"
+            for error in errors
+        )
+    if error_summary is not None:
+        document = None
+        raise ConfigError(error_summary)
+
+    assert config is not None
+    return config
