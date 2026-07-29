@@ -1,0 +1,6 @@
+monitors:
+  - id: ldxp-demo
+    name: 卡密 28
+    url: https://pay.ldxp.cn/shop/NIFGEAC5
+    categories:
+      - GPT-plus成品号
