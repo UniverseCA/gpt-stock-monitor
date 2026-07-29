@@ -475,6 +475,7 @@ def test_mixed_change_and_health_parts_all_respect_message_limit() -> None:
 
     assert result.exit_code == 0
     sent_parts = notifier.calls[0]
+    assert len(sent_parts) == 4
     assert "Monitor health" not in sent_parts[0]["content"]["text"]
     assert all(
         len(json.dumps(part, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 18_000
@@ -486,6 +487,16 @@ def test_mixed_change_and_health_parts_all_respect_message_limit() -> None:
         if "Monitor health" in part["content"]["text"]
     )
     assert all("Monitor health" in part["content"]["text"] for part in sent_parts[first_health:])
+    event_id = repository.publishes[0][1].pending_events[0].event_id
+    for index, part in enumerate(sent_parts, start=1):
+        text = part["content"]["text"]
+        marker_lines = [
+            line
+            for line in text.splitlines()
+            if line.startswith("Part: ") or line.startswith("分片: ")
+        ]
+        assert marker_lines == [f"Part: {index}/4"]
+        assert event_id in text
 
 
 def test_new_event_id_hashes_parent_plus_canonical_event_json() -> None:

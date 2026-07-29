@@ -46,6 +46,8 @@ _SITE_ERRORS = (
     SuspiciousExtractionError,
 )
 _MAX_MESSAGE_BYTES = 18_000
+_PART_NUMBER_MARGIN_BYTES = 128
+_PART_BUILD_BYTES = _MAX_MESSAGE_BYTES - _PART_NUMBER_MARGIN_BYTES
 
 
 class Notifier(Protocol):
@@ -259,7 +261,7 @@ def _partition_health_items(
         part_number = len(groups) + 1
         if (
             _payload_size(_health_payload(event_id, candidate, part_number, total_parts))
-            <= _MAX_MESSAGE_BYTES
+            <= _PART_BUILD_BYTES
         ):
             current.append(item)
             continue
@@ -270,7 +272,7 @@ def _partition_health_items(
         part_number = len(groups) + 1
         if (
             _payload_size(_health_payload(event_id, current, part_number, total_parts))
-            > _MAX_MESSAGE_BYTES
+            > _PART_BUILD_BYTES
         ):
             raise MessageTooLargeError("health event exceeds maximum message size")
     if current:
@@ -296,6 +298,44 @@ def _validate_message_parts(parts: Sequence[Mapping[str, object]]) -> None:
         raise MessageTooLargeError("notification exceeds maximum message size")
 
 
+def _is_local_part_marker(line: str) -> bool:
+    for prefix in ("分片: ", "Part: "):
+        if not line.startswith(prefix):
+            continue
+        numerator, separator, denominator = line[len(prefix) :].partition("/")
+        return (
+            separator == "/"
+            and bool(numerator)
+            and bool(denominator)
+            and numerator.isascii()
+            and denominator.isascii()
+            and numerator.isdecimal()
+            and denominator.isdecimal()
+        )
+    return False
+
+
+def _with_global_part_numbers(
+    parts: Sequence[dict[str, object]], event_id: str
+) -> list[dict[str, object]]:
+    total_parts = len(parts)
+    numbered: list[dict[str, object]] = []
+    for part_number, part in enumerate(parts, start=1):
+        content = part["content"]
+        if not isinstance(content, dict) or not isinstance(content.get("text"), str):
+            raise TypeError("generated notification payload must contain text")
+        lines = [line for line in content["text"].splitlines() if not _is_local_part_marker(line)]
+        event_line = next(
+            (index for index, line in enumerate(lines) if event_id in line),
+            None,
+        )
+        if event_line is None:
+            raise TypeError("generated notification payload must contain event id")
+        lines.insert(event_line + 1, f"Part: {part_number}/{total_parts}")
+        numbered.append({"msg_type": "text", "content": {"text": "\n".join(lines)}})
+    return numbered
+
+
 def _with_pending(
     state: StateDocument,
     parent: str | None,
@@ -304,10 +344,11 @@ def _with_pending(
 ) -> tuple[StateDocument, PendingEvent]:
     event_id = _event_id(parent, _event_document(applied, checked_at))
     parts: list[dict[str, object]] = list(
-        build_message_parts(event_id, applied.changes, checked_at, max_bytes=_MAX_MESSAGE_BYTES)
+        build_message_parts(event_id, applied.changes, checked_at, max_bytes=_PART_BUILD_BYTES)
     )
     if applied.health_events:
         parts.extend(_health_parts(event_id, applied.health_events))
+    parts = _with_global_part_numbers(parts, event_id)
     _validate_message_parts(parts)
     serialized = tuple(
         json.dumps(part, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
