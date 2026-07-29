@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
-    ConfigDict,
     Field,
     StringConstraints,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -53,9 +55,7 @@ class Snapshot(BaseModel, frozen=True):
 
     @field_validator("products")
     @classmethod
-    def reject_duplicate_product_keys(
-        cls, products: tuple[Product, ...]
-    ) -> tuple[Product, ...]:
+    def reject_duplicate_product_keys(cls, products: tuple[Product, ...]) -> tuple[Product, ...]:
         keys = [product.key for product in products]
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate product key")
@@ -92,7 +92,7 @@ class PendingEvent(BaseModel, frozen=True):
     message_parts: tuple[str, ...] = Field(min_length=1)
 
 
-class HealthRecord(BaseModel):
+class HealthRecord(BaseModel, frozen=True):
     """Failure and notification state for one monitored category."""
 
     consecutive_failures: int = Field(default=0, ge=0)
@@ -100,30 +100,37 @@ class HealthRecord(BaseModel):
     failure_notified: bool = False
 
 
-class EmptyCandidate(BaseModel):
+class EmptyCandidate(BaseModel, frozen=True):
     """Consecutive explicit-empty observations awaiting confirmation."""
 
     consecutive_observations: int = Field(default=1, ge=1)
 
 
-class StateDocument(BaseModel):
+class StateDocument(BaseModel, frozen=True):
     """Versioned, deterministic monitor state persisted on the state branch."""
 
-    model_config = ConfigDict(validate_assignment=True)
-
     schema_version: Literal[1] = 1
-    snapshots: dict[str, Snapshot] = Field(default_factory=dict)
-    health: dict[str, HealthRecord] = Field(default_factory=dict)
-    empty_candidates: dict[str, EmptyCandidate] = Field(default_factory=dict)
+    snapshots: Mapping[str, Snapshot] = Field(default_factory=lambda: MappingProxyType({}))
+    health: Mapping[str, HealthRecord] = Field(default_factory=lambda: MappingProxyType({}))
+    empty_candidates: Mapping[str, EmptyCandidate] = Field(
+        default_factory=lambda: MappingProxyType({})
+    )
     pending_events: tuple[PendingEvent, ...] = ()
     delivered_event_ids: tuple[str, ...] = ()
     next_event_sequence: int = Field(default=1, ge=1)
 
+    @field_validator("snapshots", "health", "empty_candidates")
+    @classmethod
+    def make_mapping_read_only(cls, values: Mapping[str, object]) -> Mapping[str, object]:
+        return MappingProxyType(dict(values))
+
+    @field_serializer("snapshots", "health", "empty_candidates")
+    def serialize_read_only_mapping(self, values: Mapping[str, object]) -> dict[str, object]:
+        return dict(values)
+
     @field_validator("pending_events")
     @classmethod
-    def sort_pending_events(
-        cls, events: tuple[PendingEvent, ...]
-    ) -> tuple[PendingEvent, ...]:
+    def sort_pending_events(cls, events: tuple[PendingEvent, ...]) -> tuple[PendingEvent, ...]:
         return tuple(sorted(events, key=lambda event: (event.sequence, event.event_id)))
 
     @model_validator(mode="after")
@@ -135,10 +142,9 @@ class StateDocument(BaseModel):
         event_ids = [event.event_id for event in self.pending_events]
         if len(event_ids) != len(set(event_ids)):
             raise ValueError("duplicate pending event id")
-        if self.pending_events and max(
-            event.sequence for event in self.pending_events
-        ) >= self.next_event_sequence:
-            raise ValueError(
-                "next_event_sequence must be greater than all pending event sequences"
-            )
+        if (
+            self.pending_events
+            and max(event.sequence for event in self.pending_events) >= self.next_event_sequence
+        ):
+            raise ValueError("next_event_sequence must be greater than all pending event sequences")
         return self

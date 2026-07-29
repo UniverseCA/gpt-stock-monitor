@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from typing import get_args
-
 import pytest
 from pydantic import ValidationError
 
 from gpt_stock_monitor.models import (
     Availability,
+    EmptyCandidate,
+    HealthRecord,
     PendingEvent,
     Product,
     Snapshot,
     StateDocument,
+    state_key,
 )
 
 
@@ -67,7 +68,6 @@ def test_pending_event_allows_sequence_zero() -> None:
 
 def test_state_document_schema_version_is_fixed_at_one() -> None:
     assert StateDocument().schema_version == 1
-    assert get_args(StateDocument.model_fields["schema_version"].annotation) == (1,)
 
     with pytest.raises(ValidationError):
         StateDocument(schema_version=2)  # type: ignore[arg-type]
@@ -78,9 +78,7 @@ def test_state_document_sorts_pending_events_deterministically() -> None:
     tie_breaker = PendingEvent(sequence=1, event_id="event-b", message_parts=("b",))
     first = PendingEvent(sequence=1, event_id="event-a", message_parts=("a",))
 
-    state = StateDocument(
-        pending_events=(later, tie_breaker, first), next_event_sequence=3
-    )
+    state = StateDocument(pending_events=(later, tie_breaker, first), next_event_sequence=3)
 
     assert [(event.sequence, event.event_id) for event in state.pending_events] == [
         (1, "event-a"),
@@ -96,16 +94,62 @@ def test_state_document_rejects_allocated_next_event_sequence() -> None:
         StateDocument(pending_events=(pending,), next_event_sequence=1)
 
 
-def test_state_document_sorts_pending_events_after_assignment() -> None:
-    state = StateDocument(next_event_sequence=3)
+def test_state_document_sorts_pending_events_on_rebuild() -> None:
     later = PendingEvent(sequence=2, event_id="event-c", message_parts=("later",))
     tie_breaker = PendingEvent(sequence=1, event_id="event-b", message_parts=("b",))
     first = PendingEvent(sequence=1, event_id="event-a", message_parts=("a",))
 
-    state.pending_events = (later, tie_breaker, first)
+    state = StateDocument(pending_events=(later, tie_breaker, first), next_event_sequence=3)
 
     assert [(event.sequence, event.event_id) for event in state.pending_events] == [
         (1, "event-a"),
         (1, "event-b"),
         (2, "event-c"),
     ]
+
+
+def test_failed_state_assignment_does_not_pollute_original() -> None:
+    state = StateDocument(next_event_sequence=3)
+    invalid = PendingEvent(sequence=3, event_id="event-3", message_parts=("invalid",))
+
+    with pytest.raises(ValidationError):
+        state.pending_events = (invalid,)
+
+    assert state.pending_events == ()
+    assert state.next_event_sequence == 3
+
+
+def test_state_document_snapshot_mapping_is_read_only() -> None:
+    snapshot = Snapshot(monitor_id="demo", category="GPT-plus成品号", products=(make_product(),))
+    key = state_key(snapshot.monitor_id, snapshot.category)
+    state = StateDocument(snapshots={key: snapshot})
+
+    with pytest.raises(TypeError):
+        state.snapshots["unexpected"] = snapshot
+
+    assert tuple(state.snapshots) == (key,)
+
+
+def test_nested_health_and_empty_records_are_frozen() -> None:
+    key = state_key("demo", "GPT-plus成品号")
+    state = StateDocument(health={key: HealthRecord()}, empty_candidates={key: EmptyCandidate()})
+
+    with pytest.raises(ValidationError):
+        state.health[key].consecutive_failures = 1
+    with pytest.raises(ValidationError):
+        state.empty_candidates[key].consecutive_observations = 2
+
+
+def test_state_document_read_only_mappings_remain_json_serializable() -> None:
+    snapshot = Snapshot(monitor_id="demo", category="GPT-plus成品号", products=(make_product(),))
+    key = state_key(snapshot.monitor_id, snapshot.category)
+    state = StateDocument(
+        snapshots={key: snapshot},
+        health={key: HealthRecord()},
+        empty_candidates={key: EmptyCandidate()},
+    )
+
+    dumped = state.model_dump(mode="json")
+
+    assert dumped["snapshots"][key]["monitor_id"] == "demo"
+    assert StateDocument.model_validate_json(state.model_dump_json()) == state
