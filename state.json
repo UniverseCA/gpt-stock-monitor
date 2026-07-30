@@ -6,7 +6,7 @@
   "empty_candidates": {},
   "health": {
     "ldxp-demo\u001fGPT-plus成品号": {
-      "consecutive_failures": 7,
+      "consecutive_failures": 8,
       "failure_notified": true,
       "last_error": "CategoryNotFoundError"
     }
