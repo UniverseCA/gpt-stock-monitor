@@ -5,7 +5,7 @@
 ## 元数据与文档
 
 - [ ] 确认项目名称、简介、支持范围与仓库 URL。
-- [ ] 替换版权名称：将 `LICENSE` 和 README 中的 `[Project Maintainers]` 改为经确认的真实版权名称；未替换前不得发布。
+- [x] 版权名称已由用户确认为 `UniverseCA`，并同步到 `LICENSE` 和 README。
 - [ ] 确认 MIT License 适用于全部拟发布代码和依赖组合。
 - [ ] 复核 README 的 10 分钟路径、限制、合规说明和“不保证购买成功”。
 - [ ] 确认 CONTRIBUTING、SECURITY 与实际工作流一致。
@@ -85,6 +85,6 @@ monitor-state 状态分支提交：
 
 - [ ] `git status` 只包含预期文件，提交历史不含 Secret。
 - [ ] 发布提交和标签指向已经验证的同一源代码状态。
-- [ ] 版权名称已替换并由维护者确认。
+- [x] 版权名称已替换为 `UniverseCA` 并由用户确认。
 - [ ] 用户已明确授权推送及创建 Release。
 - [ ] 发布说明准确列出首版范围与已知限制。

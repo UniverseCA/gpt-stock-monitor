@@ -2,8 +2,8 @@
 
 用 GitHub Actions 定时打开指定的 LDXP 店铺页面，比较商品名称、价格、库存文案和可用状态，并把变化发送到飞书群。状态保存在独立的 `monitor-state` Git 分支中，不需要数据库或常驻服务器。
 
-> [!IMPORTANT]
-> `LICENSE` 仍使用版权人占位符 `[Project Maintainers]`。公开发布前必须确认并替换为真实版权名称。
+> [!NOTE]
+> MIT License 版权人为 `UniverseCA`。
 
 ## 10 分钟开始使用
 
