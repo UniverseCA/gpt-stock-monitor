@@ -5,9 +5,9 @@
   "empty_candidates": {},
   "health": {
     "ldxp-demo\u001fGPT-plus成品号": {
-      "consecutive_failures": 1,
+      "consecutive_failures": 2,
       "failure_notified": true,
-      "last_error": "CategoryNotFoundError"
+      "last_error": "SiteNavigationError"
     }
   },
   "next_event_sequence": 2,
