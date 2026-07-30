@@ -53,6 +53,7 @@ jobs:
           sudo ip6tables -I OUTPUT 1 -o lo -j ACCEPT
           sudo ip6tables -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT
 
+          python_bin="$(command -v python)"
           restricted=(sudo setpriv --reuid "$(id -u)" --regid "$(id -g)" --clear-groups --no-new-privs)
           runtime_sockets=(
             /var/run/docker.sock
@@ -69,4 +70,4 @@ jobs:
             fi
           done
 
-          "${restricted[@]}" python -m pytest -q
+          "${restricted[@]}" "$python_bin" -m pytest -q

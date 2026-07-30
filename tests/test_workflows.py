@@ -33,6 +33,7 @@ RESTRICTED_SETUP = (
     'restricted=(sudo setpriv --reuid "$(id -u)" --regid "$(id -g)" --clear-groups --no-new-privs)'
 )
 RESTRICTED_COMMAND = '"${restricted[@]}"'
+PYTHON_SETUP = 'python_bin="$(command -v python)"'
 EXPECTED_INSTALL_COMMANDS = {
     "ci.yml": (
         'python -m pip install -e ".[dev]"',
@@ -175,9 +176,7 @@ def assert_ci_egress_guard(data: dict[str, Any]) -> None:
         if step.get("run", "").strip() in EXPECTED_INSTALL_COMMANDS["ci.yml"]
     ]
     test_steps = [
-        (index, step)
-        for index, step in enumerate(steps)
-        if "python -m pytest -q" in step.get("run", "")
+        (index, step) for index, step in enumerate(steps) if "-m pytest -q" in step.get("run", "")
     ]
     assert len(test_steps) == 1
     test_index, test_step = test_steps[0]
@@ -187,9 +186,10 @@ def assert_ci_egress_guard(data: dict[str, Any]) -> None:
     script = test_step["run"]
     assert script.splitlines()[0] == "set -euo pipefail"
     assert script.count("trap cleanup EXIT") == 1
-    pytest_command = f"{RESTRICTED_COMMAND} python -m pytest -q"
+    pytest_command = f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q'
     socket_check = f'{RESTRICTED_COMMAND} test ! -r "$socket"'
     assert script.count(RESTRICTED_SETUP) == 1
+    assert script.count(PYTHON_SETUP) == 1
     assert script.count(pytest_command) == 1
     assert script.count(socket_check) == 1
     assert script.count('for socket in "${runtime_sockets[@]}"; do') == 1
@@ -197,6 +197,7 @@ def assert_ci_egress_guard(data: dict[str, Any]) -> None:
     script_lines = [line.strip() for line in script.splitlines()]
     for socket in PRIVILEGED_RUNTIME_SOCKETS:
         assert script_lines.count(socket) == 1
+    assert script.index(PYTHON_SETUP) < script.index(pytest_command)
     assert script.index(socket_check) < script.index(pytest_command)
 
     for command in (
@@ -290,7 +291,9 @@ def test_ci_uses_python_312_pip_cache_and_expected_quality_commands() -> None:
         next(index for index, run in run_steps if run == command) for command in quality_commands
     ]
     pytest_index = next(
-        index for index, run in run_steps if f"{RESTRICTED_COMMAND} python -m pytest -q" in run
+        index
+        for index, run in run_steps
+        if f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q' in run
     )
     assert [*quality_indexes, pytest_index] == sorted([*quality_indexes, pytest_index])
 
@@ -366,7 +369,7 @@ def test_static_security_contracts_reject_metadata_and_workflow_mutants() -> Non
         ("-o lo -j ACCEPT", "-o eth0 -j ACCEPT"),
         ("--ctstate ESTABLISHED", "--ctstate NEW"),
         ("-j REJECT", "-j DROP"),
-        (f"{RESTRICTED_COMMAND} python -m pytest -q", "python -m pytest -q"),
+        (f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q', "python -m pytest -q"),
         ("trap cleanup EXIT", "true"),
         ("sudo iptables -D OUTPUT -j REJECT", "true"),
     )
@@ -380,8 +383,9 @@ def test_ci_runtime_socket_contract_rejects_clear_group_path_and_order_mutants()
     data, text = load_workflow("ci.yml")
     assert_ci_egress_guard(data)
     socket_check = f'{RESTRICTED_COMMAND} test ! -r "$socket"'
-    pytest_command = f"{RESTRICTED_COMMAND} python -m pytest -q"
+    pytest_command = f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q'
     mutations = [
+        text.replace(PYTHON_SETUP, 'python_bin="/usr/bin/python"', 1),
         text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("sudo ", ""), 1),
         text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("--reuid", "--ruid"), 1),
         text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("--clear-groups ", ""), 1),
