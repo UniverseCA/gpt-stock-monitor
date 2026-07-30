@@ -1,0 +1,23 @@
+{
+  "delivered_event_ids": [],
+  "empty_candidates": {},
+  "health": {
+    "ldxp-demo\u001fGPT-plus成品号": {
+      "consecutive_failures": 1,
+      "failure_notified": true,
+      "last_error": "CategoryNotFoundError"
+    }
+  },
+  "next_event_sequence": 2,
+  "pending_events": [
+    {
+      "event_id": "18da92cdac3a798008d3802b32fcd9733c5214c20d7f71d424a0fe863c843640",
+      "message_parts": [
+        "{\"content\":{\"text\":\"Monitor health\\nEvent: 18da92cdac3a798008d3802b32fcd9733c5214c20d7f71d424a0fe863c843640\\nPart: 1/1\\n\\n- failure | ldxp-demo\\u001fGPT-plus成品号 | count=1 | CategoryNotFoundError\"},\"msg_type\":\"text\"}"
+      ],
+      "sequence": 1
+    }
+  ],
+  "schema_version": 1,
+  "snapshots": {}
+}
