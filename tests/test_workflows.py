@@ -34,6 +34,7 @@ RESTRICTED_SETUP = (
 )
 RESTRICTED_COMMAND = '"${restricted[@]}"'
 PYTHON_SETUP = 'python_bin="$(command -v python)"'
+BROWSER_PATH_SETUP = 'browser_path="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"'
 EXPECTED_INSTALL_COMMANDS = {
     "ci.yml": (
         'python -m pip install -e ".[dev]"',
@@ -186,10 +187,14 @@ def assert_ci_egress_guard(data: dict[str, Any]) -> None:
     script = test_step["run"]
     assert script.splitlines()[0] == "set -euo pipefail"
     assert script.count("trap cleanup EXIT") == 1
-    pytest_command = f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q'
+    pytest_command = (
+        f'{RESTRICTED_COMMAND} env PLAYWRIGHT_BROWSERS_PATH="$browser_path" '
+        '"$python_bin" -m pytest -q'
+    )
     socket_check = f'{RESTRICTED_COMMAND} test ! -r "$socket"'
     assert script.count(RESTRICTED_SETUP) == 1
     assert script.count(PYTHON_SETUP) == 1
+    assert script.count(BROWSER_PATH_SETUP) == 1
     assert script.count(pytest_command) == 1
     assert script.count(socket_check) == 1
     assert script.count('for socket in "${runtime_sockets[@]}"; do') == 1
@@ -198,6 +203,7 @@ def assert_ci_egress_guard(data: dict[str, Any]) -> None:
     for socket in PRIVILEGED_RUNTIME_SOCKETS:
         assert script_lines.count(socket) == 1
     assert script.index(PYTHON_SETUP) < script.index(pytest_command)
+    assert script.index(BROWSER_PATH_SETUP) < script.index(pytest_command)
     assert script.index(socket_check) < script.index(pytest_command)
 
     for command in (
@@ -293,7 +299,11 @@ def test_ci_uses_python_312_pip_cache_and_expected_quality_commands() -> None:
     pytest_index = next(
         index
         for index, run in run_steps
-        if f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q' in run
+        if (
+            f'{RESTRICTED_COMMAND} env PLAYWRIGHT_BROWSERS_PATH="$browser_path" '
+            '"$python_bin" -m pytest -q'
+        )
+        in run
     )
     assert [*quality_indexes, pytest_index] == sorted([*quality_indexes, pytest_index])
 
@@ -369,7 +379,11 @@ def test_static_security_contracts_reject_metadata_and_workflow_mutants() -> Non
         ("-o lo -j ACCEPT", "-o eth0 -j ACCEPT"),
         ("--ctstate ESTABLISHED", "--ctstate NEW"),
         ("-j REJECT", "-j DROP"),
-        (f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q', "python -m pytest -q"),
+        (
+            f'{RESTRICTED_COMMAND} env PLAYWRIGHT_BROWSERS_PATH="$browser_path" '
+            '"$python_bin" -m pytest -q',
+            "python -m pytest -q",
+        ),
         ("trap cleanup EXIT", "true"),
         ("sudo iptables -D OUTPUT -j REJECT", "true"),
     )
@@ -383,9 +397,13 @@ def test_ci_runtime_socket_contract_rejects_clear_group_path_and_order_mutants()
     data, text = load_workflow("ci.yml")
     assert_ci_egress_guard(data)
     socket_check = f'{RESTRICTED_COMMAND} test ! -r "$socket"'
-    pytest_command = f'{RESTRICTED_COMMAND} "$python_bin" -m pytest -q'
+    pytest_command = (
+        f'{RESTRICTED_COMMAND} env PLAYWRIGHT_BROWSERS_PATH="$browser_path" '
+        '"$python_bin" -m pytest -q'
+    )
     mutations = [
         text.replace(PYTHON_SETUP, 'python_bin="/usr/bin/python"', 1),
+        text.replace(BROWSER_PATH_SETUP, 'browser_path="/root/.cache/ms-playwright"', 1),
         text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("sudo ", ""), 1),
         text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("--reuid", "--ruid"), 1),
         text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("--clear-groups ", ""), 1),
