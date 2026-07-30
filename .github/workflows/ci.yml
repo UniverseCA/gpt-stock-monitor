@@ -53,6 +53,7 @@ jobs:
           sudo ip6tables -I OUTPUT 1 -o lo -j ACCEPT
           sudo ip6tables -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT
 
+          restricted=(sudo setpriv --reuid "$(id -u)" --regid "$(id -g)" --clear-groups --no-new-privs)
           runtime_sockets=(
             /var/run/docker.sock
             /run/docker.sock
@@ -61,11 +62,11 @@ jobs:
           )
           for socket in "${runtime_sockets[@]}"; do
             if [[ -e "$socket" ]]; then
-              if ! setpriv --clear-groups --no-new-privs test ! -r "$socket"; then
+              if ! "${restricted[@]}" test ! -r "$socket"; then
                 echo "privileged runtime socket is readable: $socket" >&2
                 exit 1
               fi
             fi
           done
 
-          setpriv --clear-groups --no-new-privs python -m pytest -q
+          "${restricted[@]}" python -m pytest -q

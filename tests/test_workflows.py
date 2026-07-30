@@ -29,7 +29,10 @@ PRIVILEGED_RUNTIME_SOCKETS = (
     "/run/containerd/containerd.sock",
     "/var/run/podman/podman.sock",
 )
-RESTRICTED_SETPRIV = "setpriv --clear-groups --no-new-privs"
+RESTRICTED_SETUP = (
+    'restricted=(sudo setpriv --reuid "$(id -u)" --regid "$(id -g)" --clear-groups --no-new-privs)'
+)
+RESTRICTED_COMMAND = '"${restricted[@]}"'
 EXPECTED_INSTALL_COMMANDS = {
     "ci.yml": (
         'python -m pip install -e ".[dev]"',
@@ -184,8 +187,9 @@ def assert_ci_egress_guard(data: dict[str, Any]) -> None:
     script = test_step["run"]
     assert script.splitlines()[0] == "set -euo pipefail"
     assert script.count("trap cleanup EXIT") == 1
-    pytest_command = f"{RESTRICTED_SETPRIV} python -m pytest -q"
-    socket_check = f'{RESTRICTED_SETPRIV} test ! -r "$socket"'
+    pytest_command = f"{RESTRICTED_COMMAND} python -m pytest -q"
+    socket_check = f'{RESTRICTED_COMMAND} test ! -r "$socket"'
+    assert script.count(RESTRICTED_SETUP) == 1
     assert script.count(pytest_command) == 1
     assert script.count(socket_check) == 1
     assert script.count('for socket in "${runtime_sockets[@]}"; do') == 1
@@ -286,7 +290,7 @@ def test_ci_uses_python_312_pip_cache_and_expected_quality_commands() -> None:
         next(index for index, run in run_steps if run == command) for command in quality_commands
     ]
     pytest_index = next(
-        index for index, run in run_steps if f"{RESTRICTED_SETPRIV} python -m pytest -q" in run
+        index for index, run in run_steps if f"{RESTRICTED_COMMAND} python -m pytest -q" in run
     )
     assert [*quality_indexes, pytest_index] == sorted([*quality_indexes, pytest_index])
 
@@ -362,7 +366,7 @@ def test_static_security_contracts_reject_metadata_and_workflow_mutants() -> Non
         ("-o lo -j ACCEPT", "-o eth0 -j ACCEPT"),
         ("--ctstate ESTABLISHED", "--ctstate NEW"),
         ("-j REJECT", "-j DROP"),
-        (f"{RESTRICTED_SETPRIV} python -m pytest -q", "python -m pytest -q"),
+        (f"{RESTRICTED_COMMAND} python -m pytest -q", "python -m pytest -q"),
         ("trap cleanup EXIT", "true"),
         ("sudo iptables -D OUTPUT -j REJECT", "true"),
     )
@@ -375,11 +379,13 @@ def test_static_security_contracts_reject_metadata_and_workflow_mutants() -> Non
 def test_ci_runtime_socket_contract_rejects_clear_group_path_and_order_mutants() -> None:
     data, text = load_workflow("ci.yml")
     assert_ci_egress_guard(data)
-    socket_check = f'{RESTRICTED_SETPRIV} test ! -r "$socket"'
-    pytest_command = f"{RESTRICTED_SETPRIV} python -m pytest -q"
+    socket_check = f'{RESTRICTED_COMMAND} test ! -r "$socket"'
+    pytest_command = f"{RESTRICTED_COMMAND} python -m pytest -q"
     mutations = [
-        text.replace(socket_check, 'setpriv --no-new-privs test ! -r "$socket"', 1),
-        text.replace(pytest_command, "setpriv --no-new-privs python -m pytest -q", 1),
+        text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("sudo ", ""), 1),
+        text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("--reuid", "--ruid"), 1),
+        text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("--clear-groups ", ""), 1),
+        text.replace(RESTRICTED_SETUP, RESTRICTED_SETUP.replace("--no-new-privs", ""), 1),
         text.replace(socket_check, "true", 1),
         text.replace(socket_check, "__SOCKET_CHECK__", 1)
         .replace(pytest_command, socket_check, 1)
