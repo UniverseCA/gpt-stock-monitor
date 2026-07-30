@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Check formatting
+        run: ruff format --check .
+      - name: Lint
+        run: ruff check .
+      - name: Type check
+        run: mypy src
+      - name: Test without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            sudo iptables -D OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null || true
+            sudo iptables -D OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+            sudo iptables -D OUTPUT -j REJECT 2>/dev/null || true
+            sudo ip6tables -D OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null || true
+            sudo ip6tables -D OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+            sudo ip6tables -D OUTPUT -j REJECT 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          sudo iptables -I OUTPUT 1 -j REJECT
+          sudo iptables -I OUTPUT 1 -o lo -j ACCEPT
+          sudo iptables -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+          sudo ip6tables -I OUTPUT 1 -j REJECT
+          sudo ip6tables -I OUTPUT 1 -o lo -j ACCEPT
+          sudo ip6tables -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+
+          python_bin="$(command -v python)"
+          browser_path="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+          restricted=(sudo setpriv --reuid "$(id -u)" --regid "$(id -g)" --clear-groups --no-new-privs)
+          runtime_sockets=(
+            /var/run/docker.sock
+            /run/docker.sock
+            /run/containerd/containerd.sock
+            /var/run/podman/podman.sock
+          )
+          for socket in "${runtime_sockets[@]}"; do
+            if [[ -e "$socket" ]]; then
+              if ! "${restricted[@]}" test ! -r "$socket"; then
+                echo "privileged runtime socket is readable: $socket" >&2
+                exit 1
+              fi
+            fi
+          done
+
+          "${restricted[@]}" env PLAYWRIGHT_BROWSERS_PATH="$browser_path" "$python_bin" -m pytest -q
