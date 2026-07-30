@@ -153,6 +153,17 @@ def assert_windows_tzdata_contract(text: str) -> None:
     )
 
 
+def assert_ruff_toolchain_contract(text: str) -> None:
+    metadata = tomllib.loads(text)
+    dev_dependencies = metadata["project"]["optional-dependencies"]["dev"]
+    assert dev_dependencies.count("ruff==0.16.0") == 1
+    assert all(
+        not dependency.startswith("ruff") or dependency == "ruff==0.16.0"
+        for dependency in dev_dependencies
+    )
+    assert metadata["tool"]["ruff"]["extend-exclude"] == ["docs/superpowers"]
+
+
 def assert_ci_egress_guard(data: dict[str, Any]) -> None:
     steps = steps_for(data, "quality")
     install_indexes = [
@@ -246,6 +257,11 @@ def test_ci_has_read_only_permissions_and_safe_pull_request_triggers() -> None:
 def test_windows_installs_tzdata_from_main_dependencies() -> None:
     text = PYPROJECT.read_text(encoding="utf-8")
     assert_windows_tzdata_contract(text)
+
+
+def test_ruff_version_and_historical_plan_exclusion_are_reproducible() -> None:
+    text = PYPROJECT.read_text(encoding="utf-8")
+    assert_ruff_toolchain_contract(text)
 
 
 def test_ci_uses_python_312_pip_cache_and_expected_quality_commands() -> None:
@@ -449,7 +465,7 @@ def test_monitor_secret_contract_rejects_scope_mutations() -> None:
             "        env:\n"
             "          TMPDIR: ${{ runner.temp }}\n"
             "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
-            "        env:\n" "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
+            "        env:\n          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}\n",
             1,
         ),
         text.replace(

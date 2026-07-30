@@ -151,7 +151,7 @@ def test_record_failure_converts_reason_once_for_consistent_pure_data() -> None:
     ("reason", "sentinel", "expected_reason"),
     [
         (
-            "site navigation failed at " f"{FEISHU_WEBHOOK_PREFIX}SENTINEL-WEBHOOK",
+            f"site navigation failed at {FEISHU_WEBHOOK_PREFIX}SENTINEL-WEBHOOK",
             "SENTINEL-WEBHOOK",
             "site navigation failed at <url>",
         ),
@@ -297,12 +297,11 @@ def test_record_failure_redacts_quoted_mapping_values_on_all_surfaces(
     ("reason", "forbidden_fragments"),
     [
         (
-            "site navigation failed " '(headers={"X-API-Key": "SENTINEL-XAPI"}) retry pending',
+            'site navigation failed (headers={"X-API-Key": "SENTINEL-XAPI"}) retry pending',
             ("SENTINEL-XAPI",),
         ),
         (
-            "site navigation failed "
-            "(headers={'x-api-key': 'SENTINEL-XAPI-SINGLE'}) retry pending",
+            "site navigation failed (headers={'x-api-key': 'SENTINEL-XAPI-SINGLE'}) retry pending",
             ("SENTINEL-XAPI-SINGLE",),
         ),
         (
