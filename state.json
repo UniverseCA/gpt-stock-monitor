@@ -7,7 +7,7 @@
   "empty_candidates": {},
   "health": {
     "ldxp-demo\u001fGPT-plus成品号": {
-      "consecutive_failures": 17,
+      "consecutive_failures": 18,
       "failure_notified": true,
       "last_error": "SiteNavigationError"
     }
