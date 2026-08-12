@@ -21,7 +21,8 @@
     "8de34c523e92fda88947dcfdb7602e914e142b6d3b7bb17c74875bab55c784f5",
     "fa72dba186269cbf935d85778513c35e01a18443281cf5a97d1d8f1b86136eb9",
     "00d764f5a1ebc84d5c365b5a9f328191da1a85f13c7eee6021eea7458117757d",
-    "409e88180c953f5892e6f7d8b733402bdc45f701b38f0964d69571760d87b3ba"
+    "409e88180c953f5892e6f7d8b733402bdc45f701b38f0964d69571760d87b3ba",
+    "7dbe9904300c492fcec22a217e22bc3d075e0973277472c3ea656242d317803b"
   ],
   "empty_candidates": {},
   "health": {
@@ -32,15 +33,7 @@
     }
   },
   "next_event_sequence": 24,
-  "pending_events": [
-    {
-      "event_id": "7dbe9904300c492fcec22a217e22bc3d075e0973277472c3ea656242d317803b",
-      "message_parts": [
-        "{\"content\":{\"text\":\"Monitor health\\nEvent: 7dbe9904300c492fcec22a217e22bc3d075e0973277472c3ea656242d317803b\\nPart: 1/1\\n\\n- failure | ldxp-demo\\u001fGPT-plus成品号 | count=252 | SiteNavigationError\"},\"msg_type\":\"text\"}"
-      ],
-      "sequence": 23
-    }
-  ],
+  "pending_events": [],
   "schema_version": 1,
   "snapshots": {}
 }
