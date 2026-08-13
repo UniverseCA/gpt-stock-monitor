@@ -28,13 +28,21 @@
   "empty_candidates": {},
   "health": {
     "ldxp-demo\u001fGPT-plus成品号": {
-      "consecutive_failures": 275,
+      "consecutive_failures": 276,
       "failure_notified": true,
       "last_error": "SiteNavigationError"
     }
   },
-  "next_event_sequence": 25,
-  "pending_events": [],
+  "next_event_sequence": 26,
+  "pending_events": [
+    {
+      "event_id": "a724bf80c279c5e403605c60c5d6c2fba5661876467097bdba3fbee4281b69f0",
+      "message_parts": [
+        "{\"content\":{\"text\":\"Monitor health\\nEvent: a724bf80c279c5e403605c60c5d6c2fba5661876467097bdba3fbee4281b69f0\\nPart: 1/1\\n\\n- failure | ldxp-demo\\u001fGPT-plus成品号 | count=276 | SiteNavigationError\"},\"msg_type\":\"text\"}"
+      ],
+      "sequence": 25
+    }
+  ],
   "schema_version": 1,
   "snapshots": {}
 }
