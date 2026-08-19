@@ -47,7 +47,7 @@
   "empty_candidates": {},
   "health": {
     "ldxp-demo\u001fGPT-plus成品号": {
-      "consecutive_failures": 498,
+      "consecutive_failures": 499,
       "failure_notified": true,
       "last_error": "SiteNavigationError"
     }
