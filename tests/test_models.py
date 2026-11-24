@@ -23,7 +23,7 @@ def make_product(*, key: str = "product-1") -> Product:
         price_text="¥13.5",
         availability=Availability.IN_STOCK,
         stock_text="有货",
-        url="https://pay.ldxp.cn/goods/1",
+        url="https://wzyp.cn/goods/1",
     )
 
 

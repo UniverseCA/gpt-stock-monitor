@@ -38,7 +38,7 @@ def make_product(key: str = "product-1", *, name: str = "GPT Plus") -> Product:
         price_text="13.50 yuan",
         availability=Availability.IN_STOCK,
         stock_text="in stock",
-        url=f"https://pay.ldxp.cn/goods/{key}",
+        url=f"https://wzyp.cn/goods/{key}",
     )
 
 
@@ -525,13 +525,13 @@ def test_second_zero_removes_old_products_in_product_key_order_only_once() -> No
             kind=ChangeKind.REMOVED,
             product_key="alpha",
             product_name="Alpha",
-            url="https://pay.ldxp.cn/goods/alpha",
+            url="https://wzyp.cn/goods/alpha",
         ),
         Change(
             kind=ChangeKind.REMOVED,
             product_key="zeta",
             product_name="Zeta",
-            url="https://pay.ldxp.cn/goods/zeta",
+            url="https://wzyp.cn/goods/zeta",
         ),
     )
     assert third.events == ()

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page, Route
 
-from gpt_stock_monitor.config import MonitorConfig, validate_final_url
+from gpt_stock_monitor.config import SHOP_HOST, MonitorConfig, validate_final_url
 from gpt_stock_monitor.models import Availability, Product
 from gpt_stock_monitor.sites.base import (
     CategoryNotFoundError,
@@ -22,7 +22,10 @@ from gpt_stock_monitor.sites.base import (
 _COUNT = re.compile(r"^共\s*(\d+)\s*种商品$")
 _ITEM_PATH = re.compile(r"^/item/([A-Za-z0-9_-]+)$")
 _PRICE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d+)?$")
-_CHALLENGE_TEXT = re.compile(r"安全验证|人机验证")
+_CHALLENGE_TEXT = re.compile(
+    r"安全验证|人机验证|验证您是真人|滑动验证|slide to verify|verify that you are a real person",
+    re.IGNORECASE,
+)
 _ProductFingerprint = tuple[tuple[str, str, str, str], ...]
 
 
@@ -45,7 +48,8 @@ class LdxpAdapter:
             if self._request_is_approved(config, route):
                 await route.fallback()
                 return
-            self._unsafe_request_detected = True
+            if route.request.is_navigation_request():
+                self._unsafe_request_detected = True
             await route.abort()
 
         context = self._page.context
@@ -78,7 +82,7 @@ class LdxpAdapter:
             return False
         return (
             parsed.scheme == "https"
-            and parsed.hostname == "pay.ldxp.cn"
+            and parsed.hostname == SHOP_HOST
             and parsed.username is None
             and parsed.password is None
             and port in (None, 443)
@@ -128,8 +132,18 @@ class LdxpAdapter:
             body_text = await self._page.locator("body").inner_text()
         except PlaywrightError as exc:
             raise SiteNavigationError("shop body could not be read after navigation") from exc
-        if _CHALLENGE_TEXT.search(_visible_text(body_text)):
+        if _CHALLENGE_TEXT.search(_visible_text(body_text)) or await self._has_waf_marker():
             raise InteractiveChallengeError("shop requires interactive verification")
+
+    async def _has_waf_marker(self) -> bool:
+        # The Alibaba Cloud ESA challenge page sets this global before rendering any
+        # text; the real shop page never defines it.
+        try:
+            return bool(
+                await self._page.evaluate("() => typeof window._waf_is_mobile !== 'undefined'")
+            )
+        except PlaywrightError as exc:
+            raise SiteNavigationError("shop page could not be inspected after navigation") from exc
 
     def _validate_page_url(self, config: MonitorConfig) -> None:
         self._raise_if_unsafe_request()
@@ -322,7 +336,7 @@ class LdxpAdapter:
                 price_text=f"{currency}{price}",
                 availability=availability,
                 stock_text=stock_text,
-                url=f"https://pay.ldxp.cn/item/{item_id}",
+                url=f"https://{SHOP_HOST}/item/{item_id}",
             )
         except PlaywrightError as exc:
             extraction_error = SuspiciousExtractionError(
@@ -412,7 +426,7 @@ class LdxpAdapter:
 
     @staticmethod
     def _availability(stock_text: str) -> Availability:
-        if stock_text in {"有货", "库存充足"}:
+        if stock_text in {"有货", "库存充足", "库存一般"}:
             return Availability.IN_STOCK
         if stock_text == "库存少量":
             return Availability.LOW_STOCK

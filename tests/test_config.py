@@ -20,7 +20,7 @@ VALID_CONFIG = """\
 monitors:
   - id: ldxp-demo
     name: \u5361\u5bc6 28
-    url: https://pay.ldxp.cn/shop/NIFGEAC5
+    url: https://wzyp.cn/shop/NIFGEAC5
     categories:
       - GPT-plus\u6210\u54c1\u53f7
 """
@@ -49,7 +49,7 @@ def test_rejects_duplicate_monitor_ids(tmp_path: Path) -> None:
         + f"""\
   - id: {duplicate_id}
     name: Another
-    url: https://pay.ldxp.cn/shop/OTHER_2
+    url: https://wzyp.cn/shop/OTHER_2
     categories: [Category]
 """
     )
@@ -94,7 +94,7 @@ def test_rejects_duplicate_categories_after_normalization(
             {
                 "id": "monitor",
                 "name": "Monitor",
-                "url": "https://pay.ldxp.cn/shop/MONITOR",
+                "url": "https://wzyp.cn/shop/MONITOR",
                 "categories": categories,
             }
         )
@@ -108,7 +108,7 @@ def test_category_duplicate_check_remains_case_sensitive() -> None:
         {
             "id": "monitor",
             "name": "Monitor",
-            "url": "https://pay.ldxp.cn/shop/MONITOR",
+            "url": "https://wzyp.cn/shop/MONITOR",
             "categories": ("same", "Same"),
         }
     )
@@ -133,22 +133,23 @@ def test_rejects_unknown_fields(tmp_path: Path, content: str) -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        "http://pay.ldxp.cn/shop/NIFGEAC5",
-        "https://pay.ldxp.cn:8443/shop/NIFGEAC5",
-        "https://user@pay.ldxp.cn/shop/NIFGEAC5",
-        "https://user:password@pay.ldxp.cn/shop/NIFGEAC5",
-        "https://pay.ldxp.cn/shop/NIFGEAC5?",
-        "https://pay.ldxp.cn/shop/NIFGEAC5?source=test",
-        "https://pay.ldxp.cn/shop/NIFGEAC5#",
-        "https://pay.ldxp.cn/shop/NIFGEAC5#products",
+        "http://wzyp.cn/shop/NIFGEAC5",
+        "https://wzyp.cn:8443/shop/NIFGEAC5",
+        "https://user@wzyp.cn/shop/NIFGEAC5",
+        "https://user:password@wzyp.cn/shop/NIFGEAC5",
+        "https://wzyp.cn/shop/NIFGEAC5?",
+        "https://wzyp.cn/shop/NIFGEAC5?source=test",
+        "https://wzyp.cn/shop/NIFGEAC5#",
+        "https://wzyp.cn/shop/NIFGEAC5#products",
         "https://evil.example/shop/NIFGEAC5",
-        "https://pay.ldxp.cn.evil.example/shop/NIFGEAC5",
-        "https://evil-pay.ldxp.cn/shop/NIFGEAC5",
-        "https://pay.ldxp.cn/shop/NIFGEAC5/extra",
-        "https://pay.ldxp.cn/shop/NIFGEAC5/",
-        "https://pay.ldxp.cn/shop/invalid.id",
-        "https://pay.ldxp.cn/shop/%2Fetc",
-        "https://pay.ldxp.cn/shop/\u5546\u5e97",
+        "https://pay.ldxp.cn/shop/NIFGEAC5",
+        "https://wzyp.cn.evil.example/shop/NIFGEAC5",
+        "https://evil-wzyp.cn/shop/NIFGEAC5",
+        "https://wzyp.cn/shop/NIFGEAC5/extra",
+        "https://wzyp.cn/shop/NIFGEAC5/",
+        "https://wzyp.cn/shop/invalid.id",
+        "https://wzyp.cn/shop/%2Fetc",
+        "https://wzyp.cn/shop/\u5546\u5e97",
     ],
 )
 def test_validate_shop_url_rejects_unsafe_or_malformed_urls(value: str) -> None:
@@ -157,18 +158,18 @@ def test_validate_shop_url_rejects_unsafe_or_malformed_urls(value: str) -> None:
 
 
 def test_validate_shop_url_accepts_default_https_port() -> None:
-    result = validate_shop_url("https://pay.ldxp.cn:443/shop/shop_01-test")
+    result = validate_shop_url("https://wzyp.cn:443/shop/shop_01-test")
 
-    assert result.host == "pay.ldxp.cn"
+    assert result.host == "wzyp.cn"
 
 
 @pytest.mark.parametrize(
     "value",
     [
         "https://evil.example/shop/NIFGEAC5",
-        "https://pay.ldxp.cn/shop/NIFGEAC5/",
-        "https://pay.ldxp.cn/shop/NIFGEAC5?redirected=true",
-        "https://pay.ldxp.cn/shop/OTHER",
+        "https://wzyp.cn/shop/NIFGEAC5/",
+        "https://wzyp.cn/shop/NIFGEAC5?redirected=true",
+        "https://wzyp.cn/shop/OTHER",
     ],
 )
 def test_validate_final_url_revalidates_structure_and_shop_id(value: str) -> None:
@@ -177,7 +178,7 @@ def test_validate_final_url_revalidates_structure_and_shop_id(value: str) -> Non
 
 
 def test_validate_final_url_accepts_same_shop() -> None:
-    validate_final_url("NIFGEAC5", "https://pay.ldxp.cn/shop/NIFGEAC5")
+    validate_final_url("NIFGEAC5", "https://wzyp.cn/shop/NIFGEAC5")
 
 
 @pytest.mark.parametrize("content", ["", "- not-a-mapping\n"])
@@ -198,7 +199,7 @@ def test_validation_error_does_not_echo_unknown_webhook_secret(tmp_path: Path) -
 
 def test_parser_error_does_not_leak_credentials_through_exception_chain() -> None:
     secret = "sentinel-parser-secret"
-    value = f"https://user:{secret}\uff20pay.ldxp.cn/shop/NIFGEAC5"
+    value = f"https://user:{secret}\uff20wzyp.cn/shop/NIFGEAC5"
 
     with pytest.raises(ValueError) as exc_info:
         validate_shop_url(value)
@@ -217,9 +218,9 @@ def test_parser_error_does_not_leak_credentials_through_exception_chain() -> Non
 @pytest.mark.parametrize(
     "template",
     [
-        "https://pay.ldxp.cn{control}/shop/NIFGEAC5",
-        "https://pay.ldxp.cn/{control}shop/NIFGEAC5",
-        "https://pay.ldxp.cn/shop/NIF{control}GEAC5",
+        "https://wzyp.cn{control}/shop/NIFGEAC5",
+        "https://wzyp.cn/{control}shop/NIFGEAC5",
+        "https://wzyp.cn/shop/NIF{control}GEAC5",
     ],
     ids=["host", "path-prefix", "shop-id"],
 )
@@ -240,13 +241,13 @@ def test_rejects_monitor_values_that_would_collide_as_state_keys() -> None:
                     {
                         "id": first["id"],
                         "name": "First",
-                        "url": "https://pay.ldxp.cn/shop/FIRST",
+                        "url": "https://wzyp.cn/shop/FIRST",
                         "categories": [first["category"]],
                     },
                     {
                         "id": second["id"],
                         "name": "Second",
-                        "url": "https://pay.ldxp.cn/shop/SECOND",
+                        "url": "https://wzyp.cn/shop/SECOND",
                         "categories": [second["category"]],
                     },
                 ]
@@ -262,7 +263,7 @@ def test_rejects_control_characters_in_monitor_strings(field: str, value: object
     monitor: dict[str, object] = {
         "id": "monitor",
         "name": "Monitor",
-        "url": "https://pay.ldxp.cn/shop/MONITOR",
+        "url": "https://wzyp.cn/shop/MONITOR",
         "categories": ["Category"],
     }
     monitor[field] = value
@@ -274,13 +275,13 @@ def test_rejects_control_characters_in_monitor_strings(field: str, value: object
 @pytest.mark.parametrize(
     "value",
     [
-        "\x00https://pay.ldxp.cn/shop/NIFGEAC5",
-        "\x1fhttps://pay.ldxp.cn/shop/NIFGEAC5",
-        "\x7fhttps://pay.ldxp.cn/shop/NIFGEAC5",
-        "\x85https://pay.ldxp.cn/shop/NIFGEAC5",
-        "https://pay.ldxp.cn\x01/shop/NIFGEAC5",
-        "https://pay.ldxp.cn/shop/NIF\x7fGEAC5",
-        "https://pay.ldxp.cn/shop/NIF\x85GEAC5",
+        "\x00https://wzyp.cn/shop/NIFGEAC5",
+        "\x1fhttps://wzyp.cn/shop/NIFGEAC5",
+        "\x7fhttps://wzyp.cn/shop/NIFGEAC5",
+        "\x85https://wzyp.cn/shop/NIFGEAC5",
+        "https://wzyp.cn\x01/shop/NIFGEAC5",
+        "https://wzyp.cn/shop/NIF\x7fGEAC5",
+        "https://wzyp.cn/shop/NIF\x85GEAC5",
     ],
 )
 def test_rejects_all_raw_unicode_control_characters_before_url_parsing(value: str) -> None:
@@ -308,9 +309,7 @@ def exception_surface(exc: BaseException) -> str:
     ("content", "sentinel", "expected_clues"),
     [
         (
-            VALID_CONFIG.replace(
-                "https://pay.ldxp.cn", "https://user:sentinel-url-password@pay.ldxp.cn"
-            ),
+            VALID_CONFIG.replace("https://wzyp.cn", "https://user:sentinel-url-password@wzyp.cn"),
             "sentinel-url-password",
             ("monitors.0.url", "value_error"),
         ),
@@ -374,7 +373,7 @@ def test_rejects_edge_control_characters_before_whitespace_stripping(
     monitor: dict[str, object] = {
         "id": " monitor-id ",
         "name": " Monitor ",
-        "url": "https://pay.ldxp.cn/shop/MONITOR",
+        "url": "https://wzyp.cn/shop/MONITOR",
         "categories": [" Category "],
     }
     monitor[field] = [control_value] if field == "categories" else control_value
@@ -390,7 +389,7 @@ def test_strips_ordinary_spaces_from_monitor_strings() -> None:
                 {
                     "id": " monitor-id ",
                     "name": " Monitor ",
-                    "url": "https://pay.ldxp.cn/shop/MONITOR",
+                    "url": "https://wzyp.cn/shop/MONITOR",
                     "categories": [" Category "],
                 }
             ]

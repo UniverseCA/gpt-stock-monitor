@@ -28,7 +28,7 @@ def app_config() -> AppConfig:
                 {
                     "id": "shop",
                     "name": "测试商店",
-                    "url": "https://pay.ldxp.cn/shop/NIFGEAC5",
+                    "url": "https://wzyp.cn/shop/NIFGEAC5",
                     "categories": ["GPT 商品"],
                 }
             ]

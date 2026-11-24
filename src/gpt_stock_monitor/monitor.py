@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -144,6 +145,9 @@ async def _collect(config: AppConfig, adapter: SiteAdapter) -> dict[str, _Collec
                 raise TypeError("adapter result must be a mapping")
         except _SITE_ERRORS as exc:
             reason = type(exc).__name__
+            # Adapter error messages are fixed, secret-free strings; surfacing them lets an
+            # operator see which extraction step failed without changing persisted state.
+            sys.stderr.write(f"site error: {monitor.id}: {reason}: {exc}\n")
             for category in monitor.categories:
                 collected[state_key(monitor.id, category)] = _Collected(None, reason)
             continue

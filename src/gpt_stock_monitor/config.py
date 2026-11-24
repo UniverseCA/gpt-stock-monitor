@@ -39,6 +39,7 @@ NonEmptyStr = Annotated[
     StringConstraints(strip_whitespace=True, min_length=1),
     BeforeValidator(_reject_control_characters),
 ]
+SHOP_HOST = "wzyp.cn"
 SHOP_PATH = re.compile(r"^/shop/(?P<shop_id>[A-Za-z0-9_-]+)$")
 URL_ADAPTER = TypeAdapter(AnyHttpUrl)
 
@@ -64,8 +65,8 @@ def _shop_id_from_url(value: str) -> str:
         raise ValueError("shop URL must not contain surrounding whitespace")
     if parsed.scheme != "https":
         raise ValueError("shop URL must use HTTPS")
-    if parsed.hostname != "pay.ldxp.cn":
-        raise ValueError("shop URL host must be pay.ldxp.cn")
+    if parsed.hostname != SHOP_HOST:
+        raise ValueError(f"shop URL host must be {SHOP_HOST}")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("shop URL must not contain user credentials")
     if port not in (None, 443):
@@ -82,7 +83,7 @@ def _shop_id_from_url(value: str) -> str:
 
 
 def validate_shop_url(value: str) -> AnyHttpUrl:
-    """Validate and return an approved ldxp shop URL."""
+    """Validate and return an approved ldxp (wzyp.cn) shop URL."""
     _shop_id_from_url(value)
     return URL_ADAPTER.validate_python(value)
 
