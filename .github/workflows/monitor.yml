@@ -6,6 +6,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: gpt-stock-monitor
+  cancel-in-progress: false
+
 jobs:
   hosted-probe:
     runs-on: ubuntu-latest
