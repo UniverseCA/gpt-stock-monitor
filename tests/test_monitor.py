@@ -40,7 +40,7 @@ def app_config(*categories: str) -> AppConfig:
                 {
                     "id": "shop-a",
                     "name": "Shop A",
-                    "url": "https://pay.ldxp.cn/shop/a",
+                    "url": "https://wzyp.cn/shop/a",
                     "categories": list(categories or ("General",)),
                 }
             ]

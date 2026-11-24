@@ -21,7 +21,7 @@ from gpt_stock_monitor.sites.base import (
 )
 from gpt_stock_monitor.sites.ldxp import LdxpAdapter
 
-SHOP_URL = "https://pay.ldxp.cn/shop/NIFGEAC5"
+SHOP_URL = "https://wzyp.cn/shop/NIFGEAC5"
 CATEGORY = "GPT-plus成品号"
 FIXTURES = Path(__file__).parent / "fixtures" / "ldxp"
 
@@ -224,7 +224,7 @@ def test_collects_sampled_card_details_from_post_click_canonical_link() -> None:
 
     product = observations[CATEGORY].products[0]
     assert product.key == "3xxf1n"
-    assert product.url == "https://pay.ldxp.cn/item/3xxf1n"
+    assert product.url == "https://wzyp.cn/item/3xxf1n"
     assert product.name == "gpt 直卡 plus"
     assert product.price == "13.5"
     assert product.price_text == "￥13.5"
@@ -371,9 +371,9 @@ def test_body_playwright_error_is_mapped_to_site_navigation_error() -> None:
     [
         "https://evil.example/redirect",
         "http://127.0.0.1/redirect",
-        "https://pay.ldxp.cn/shop/OTHER",
-        "https://pay.ldxp.cn/shop/NIFGEAC5?next=1",
-        "https://pay.ldxp.cn:444/shop/NIFGEAC5",
+        "https://wzyp.cn/shop/OTHER",
+        "https://wzyp.cn/shop/NIFGEAC5?next=1",
+        "https://wzyp.cn:444/shop/NIFGEAC5",
     ],
 )
 def test_aborts_unapproved_redirect_hop_before_existing_route_observes_it(
@@ -424,7 +424,7 @@ def test_aborts_unapproved_redirect_hop_before_existing_route_observes_it(
 
 
 def test_unroutes_failed_monitor_guard_before_collecting_another_monitor() -> None:
-    other_shop_url = "https://pay.ldxp.cn/shop/OTHER"
+    other_shop_url = "https://wzyp.cn/shop/OTHER"
     intermediate_url = "https://evil.example/redirect"
 
     async def exercise() -> None:
@@ -527,7 +527,7 @@ def test_context_guard_aborts_popup_first_navigation_before_existing_route(
         "https://10.0.0.1/app.js",
     ],
 )
-def test_aborts_unapproved_subresource_before_existing_route_observes_it(
+def test_silently_aborts_unapproved_subresource_before_existing_route_observes_it(
     subresource_url: str,
 ) -> None:
     observed_requests: list[str] = []
@@ -566,14 +566,15 @@ def test_aborts_unapproved_subresource_before_existing_route_observes_it(
             finally:
                 await browser.close()
 
-    with pytest.raises(SiteNavigationError):
-        asyncio.run(exercise())
+    # Third-party scripts (for example the shop's analytics tag) never reach the
+    # network, but they no longer fail an otherwise valid collection.
+    asyncio.run(exercise())
 
     assert subresource_url not in observed_requests
 
 
 def test_allows_approved_default_port_https_subresource_via_existing_route() -> None:
-    subresource_url = "https://pay.ldxp.cn/app.js"
+    subresource_url = "https://wzyp.cn/app.js"
     observed_requests: list[str] = []
 
     async def exercise() -> None:
@@ -613,12 +614,13 @@ def test_allows_approved_default_port_https_subresource_via_existing_route() -> 
     ("stock_text", "expected"),
     [
         ("有货", Availability.IN_STOCK),
+        ("库存一般", Availability.IN_STOCK),
         ("库存少量", Availability.LOW_STOCK),
         ("缺货", Availability.OUT_OF_STOCK),
         ("等待补充", Availability.UNKNOWN),
     ],
 )
-def test_maps_four_inventory_states(stock_text: str, expected: Availability) -> None:
+def test_maps_inventory_states(stock_text: str, expected: Availability) -> None:
     observations, _ = collect(
         shop_html([("Product", "10", stock_text)]),
         [{"href": "/item/item-1", "max": None}],
@@ -688,6 +690,36 @@ def test_rejects_missing_or_noncanonical_item_link(href: str | None) -> None:
 def test_challenge_page_raises_interactive_challenge_error() -> None:
     with pytest.raises(InteractiveChallengeError):
         collect(fixture("challenge.html"), [])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<p>Please complete the operation to verify that you are a real person</p>",
+        "<p>Please slide to verify</p>",
+        "<p>请完成以下操作\uff0c验证您是真人</p>",
+    ],
+)
+def test_esa_challenge_text_raises_without_retrying(body: str) -> None:
+    navigation_requests: list[str] = []
+    html = (
+        f"<!doctype html><html><head><title>Verification</title></head><body>{body}</body></html>"
+    )
+
+    with pytest.raises(InteractiveChallengeError):
+        collect(html, [], navigation_requests=navigation_requests)
+
+    assert navigation_requests == [SHOP_URL]
+
+
+def test_esa_challenge_marker_raises_before_text_renders() -> None:
+    html = (
+        "<!doctype html><html><head><title></title>"
+        "<script>window._waf_is_mobile=!1</script></head><body></body></html>"
+    )
+
+    with pytest.raises(InteractiveChallengeError):
+        collect(html, [])
 
 
 def test_missing_exact_category_raises_after_at_most_three_attempts() -> None:

@@ -20,7 +20,9 @@ concurrency:
 
 jobs:
   monitor:
-    runs-on: ubuntu-latest
+    # The shop's WAF challenges overseas datacenter IPs, so this job runs on the
+    # operator's own machine registered as a self-hosted runner with this label.
+    runs-on: [self-hosted, stock-monitor]
     timeout-minutes: 10
     environment: monitor-production
     env:
@@ -31,15 +33,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.12"
-          cache: pip
+      # Uses the Python 3.12 preinstalled on the runner machine (see README).
       - name: Install project
         run: python -m pip install .
       - name: Install Chromium
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install chromium
       - name: Run live monitor
         if: github.event_name == 'schedule' || inputs.dry_run == false
         run: gpt-stock-monitor

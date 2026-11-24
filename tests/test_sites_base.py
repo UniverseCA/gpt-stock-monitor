@@ -25,7 +25,7 @@ def make_product() -> Product:
         price_text="13.50 yuan",
         availability=Availability.IN_STOCK,
         stock_text="in stock",
-        url="https://pay.ldxp.cn/goods/1",
+        url="https://wzyp.cn/goods/1",
     )
 
 

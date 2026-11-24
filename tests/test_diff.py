@@ -13,7 +13,7 @@ def make_product(
     price: str = "13.50",
     availability: Availability = Availability.IN_STOCK,
     stock_text: str = "有货",
-    url: str | None = "https://pay.ldxp.cn/goods/1",
+    url: str | None = "https://wzyp.cn/goods/1",
 ) -> Product:
     return Product(
         key=key,
@@ -40,7 +40,7 @@ def expected_change(
     product_name: str = "GPT Plus",
     before: str | None = None,
     after: str | None = None,
-    url: str | None = "https://pay.ldxp.cn/goods/1",
+    url: str | None = "https://wzyp.cn/goods/1",
 ) -> Change:
     return Change(
         kind=kind,

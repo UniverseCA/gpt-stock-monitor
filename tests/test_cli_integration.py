@@ -22,7 +22,7 @@ from gpt_stock_monitor.state import (
     write_state_atomic,
 )
 
-SHOP_URL = "https://pay.ldxp.cn/shop/NIFGEAC5"
+SHOP_URL = "https://wzyp.cn/shop/NIFGEAC5"
 CATEGORY = "GPT 商品"
 WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/" + "hook/test-only-token-1234"
 PADDING = "x" * 3_200
@@ -223,21 +223,21 @@ def test_real_cli_pipeline_and_dry_run_preserve_pending_state(
     combined_notification = "\n".join(payload_texts)
     expected_payload_fragments = (
         GOLF,
-        "https://pay.ldxp.cn/item/G",
+        "https://wzyp.cn/item/G",
         ECHO,
-        "https://pay.ldxp.cn/item/E",
+        "https://wzyp.cn/item/E",
         ALPHA,
         "out_of_stock → in_stock",
-        "https://pay.ldxp.cn/item/A",
+        "https://wzyp.cn/item/A",
         BETA,
         "in_stock → out_of_stock",
-        "https://pay.ldxp.cn/item/B",
+        "https://wzyp.cn/item/B",
         OLD_CHARLIE,
         NEW_CHARLIE,
-        "https://pay.ldxp.cn/item/C",
+        "https://wzyp.cn/item/C",
         DELTA,
         "40 → 41",
-        "https://pay.ldxp.cn/item/D",
+        "https://wzyp.cn/item/D",
     )
     for expected in expected_payload_fragments:
         assert expected in combined_notification
