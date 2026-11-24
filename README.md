@@ -3,7 +3,7 @@
 用 GitHub Actions 定时打开指定的链动小铺（LDXP，现域名 `wzyp.cn`）店铺页面，比较商品名称、价格、库存文案和可用状态，并把变化发送到飞书群。状态保存在独立的 `monitor-state` Git 分支中，不需要数据库。
 
 > [!IMPORTANT]
-> 店铺的阿里云 ESA 防护会对海外机房 IP（包括 GitHub 托管 runner）弹出滑块验证，本项目不会绕过验证码。因此监控工作流运行在**你自己的电脑**上：把它注册为 GitHub 自托管 runner（见第 5 步）。
+> 店铺的阿里云 ESA 防护会对海外机房 IP（包括 GitHub 托管 runner）弹出滑块验证，本项目不会绕过验证码。因此监控工作流运行在一台**国内的 Ubuntu 服务器**上：把它注册为 GitHub 自托管 runner（见第 5b 步）。
 
 > [!NOTE]
 > MIT License 版权人为 `UniverseCA`。
@@ -55,23 +55,36 @@ Webhook 等同于密码：不要写进 YAML、代码、提交、Issue、截图�
 
 打开 **Settings → Actions → General → Workflow permissions**，选择 **Read and write permissions** 并保存。仓库内监控工作流也显式声明了 `contents: write`；缺少仓库级写权限时无法创建或更新 `monitor-state`。
 
-### 5b. 在自己电脑上注册自托管 runner（Windows）
+### 5b. 在国内 Ubuntu 服务器上注册自托管 runner
 
-先做安全设置。GitHub 建议自托管 runner 只用于**私有仓库**：在公开仓库中，别人提交的 Pull Request 可以修改工作流，让代码跑到你的电脑上。二选一：
+先做安全设置。GitHub 建议自托管 runner 只用于**私有仓库**：在公开仓库中，别人提交的 Pull Request 可以修改工作流，让代码跑到你的服务器上。二选一：
 
 - 推荐：**Settings → General → Danger Zone → Change visibility** 改为私有。自托管 runner 不消耗 Actions 分钟数。
 - 若必须保持公开：在 **Settings → Actions → General → Fork pull request workflows from outside collaborators** 选择 **Require approval for all outside collaborators**，并且永远不要批准你没有逐行审过的外部 PR。
 
-然后准备电脑（只需一次）：
+服务器要求 Ubuntu 22.04 或 24.04 x64（`actions/setup-python` 与 Playwright 不支持 Alibaba Cloud Linux 等发行版）。以 root 登录后执行一次：
 
-1. 安装 [Python 3.12](https://www.python.org/downloads/windows/)：使用默认的“为当前用户安装”，并勾选 **Add python.exe to PATH**。这会同时把 `Scripts` 目录加入 PATH，`gpt-stock-monitor` 命令才能被找到。
-2. 安装 [Git for Windows](https://git-scm.com/download/win)，保持默认选项。
-3. 打开新的 PowerShell，确认 `python --version` 显示 3.12.x、`git --version` 有输出。
-4. 在仓库 **Settings → Actions → Runners → New self-hosted runner** 选择 **Windows / x64**，按页面上的命令下载并解压 runner（建议放在 `C:\actions-runner`）。
-5. 执行页面给出的 `config.cmd` 命令时，在询问附加标签（additional labels）那一步输入 `stock-monitor`。工作流只会调度到同时带有 `self-hosted` 和 `stock-monitor` 标签的 runner。
-6. 询问是否作为服务运行时选 **N**，之后用 `run.cmd` 在你自己的登录会话中启动。这样它使用你本人安装的 Python 和 Chromium；关掉窗口即停止监控。
+1. 安装 Git 和 Chromium 运行所需的系统库（借用一个临时虚拟环境里的 Playwright 读取官方依赖清单）：
 
-电脑关机、睡眠或 `run.cmd` 未运行时，定时任务会排队直到超时，不会补跑，也不会产生告警。
+   ```bash
+   apt-get update && apt-get install -y git python3-venv
+   python3 -m venv /tmp/pw && /tmp/pw/bin/pip install playwright && /tmp/pw/bin/playwright install-deps chromium && rm -rf /tmp/pw
+   ```
+
+2. 创建运行 runner 的普通用户（runner 拒绝以 root 运行）：
+
+   ```bash
+   useradd -m -s /bin/bash runner
+   ```
+
+3. 在仓库 **Settings → Actions → Runners → New self-hosted runner** 选择 **Linux / x64**。切换到该用户（`su - runner`），按页面上的命令下载、解压并执行 `./config.sh`；询问附加标签（additional labels）时输入 `stock-monitor`。工作流只会调度到同时带有 `self-hosted` 和 `stock-monitor` 标签的 runner。页面上的注册 token 只给你自己用。
+4. `exit` 回到 root，在 runner 目录安装并启动系统服务：
+
+   ```bash
+   cd /home/runner/actions-runner && ./svc.sh install runner && ./svc.sh start
+   ```
+
+首次运行时 `setup-python` 会下载 Python 3.12，Playwright 会下载 Chromium，耗时较长。服务器连接 GitHub 偶尔会慢或中断；单次失败可直接重跑。
 
 ### 6. 手动 dry-run
 
@@ -117,11 +130,11 @@ dry-run 会使用普通无头 Chromium 访问配置的真实店铺并读取远�
 
 可能原因包括网络失败、页面结构变化、分类不存在、可疑空结果、重定向到未批准 URL，或出现验证码。项目会保守失败，不会尝试绕过交互式验证。先在获得目标站点访问授权的前提下运行手动 dry-run，并检查脱敏日志。
 
-站点采集失败时，日志中会有一行 `site error: <监控 ID>: <异常类型>: <失败环节>`，例如 `InteractiveChallengeError` 表示这台电脑的网络也被要求滑块验证，`SuspiciousExtractionError: product modal lacks one canonical item link` 表示页面结构已变化。反馈问题时附上这一行即可，不要附 Webhook。
+站点采集失败时，日志中会有一行 `site error: <监控 ID>: <异常类型>: <失败环节>`，例如 `InteractiveChallengeError` 表示这台服务器的网络也被要求滑块验证，`AccessDeniedError` 表示站点的机器人规则直接拒绝了自动化访问（HTTP 401/403/429，不会重试，项目也不会尝试绕过），`SuspiciousExtractionError: product modal lacks one canonical item link` 表示页面结构已变化。反馈问题时附上这一行即可，不要附 Webhook。
 
 ### 任务一直排队（Queued）
 
-自托管 runner 不在线。确认电脑未睡眠、`run.cmd` 窗口仍在运行，且 runner 带有 `stock-monitor` 标签。
+自托管 runner 不在线。在服务器上执行 `cd /home/runner/actions-runner && ./svc.sh status` 查看服务状态，并确认 runner 带有 `stock-monitor` 标签。
 
 ### 没有立即收到通知
 

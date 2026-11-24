@@ -356,9 +356,10 @@ def test_monitor_job_is_bounded_and_uses_isolated_temp_state_and_bot_identity() 
     steps = steps_for(data, "monitor")
     checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
     assert checkout.get("with", {}).get("persist-credentials", "true") == "true"
-    # setup-python needs admin rights, 7zip and registry writes on a Windows
-    # self-hosted runner, so the job uses the machine's preinstalled Python.
-    assert not any(step.get("uses", "").startswith("actions/setup-python@") for step in steps)
+    setup_python = next(
+        step for step in steps if step.get("uses", "").startswith("actions/setup-python@")
+    )
+    assert setup_python["with"] == {"python-version": "3.12", "cache": "pip"}
     run_commands = [step["run"].strip() for step in steps if "run" in step]
     assert "python -m pip install ." in run_commands
     assert "python -m playwright install chromium" in run_commands

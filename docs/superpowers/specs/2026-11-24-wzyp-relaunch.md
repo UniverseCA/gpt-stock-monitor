@@ -77,7 +77,16 @@ GitHub 托管 runner）访问，仍然返回阿里云 ESA 的滑块验证页（"
    稳定 ID（点击商品后的弹窗结构此前无法离线核对，这一条是首要验证点）。
 9. 自托管 runner 上 `Monitor stock` 的 dry-run 成功；随后非 dry-run 静默建立基线。
 
-## 6. 风险
+## 6. 补充决定（同日）
+
+- 用户电脑上的 dry-run 被 ESA `http_bot_simple` 规则以 HTTP 403 拒绝，原实现把拒绝页当店铺页解析并重试 3 次，
+  误报 `CategoryNotFoundError`。现在 401/403/429 抛出 `AccessDeniedError`（`InteractiveChallengeError`
+  的子类，不重试、不绕过），其他 4xx/5xx 抛出带状态码、可重试的 `SiteNavigationError`。
+- 运行位置改为用户购买的国内云服务器（Ubuntu 22.04 x64）。Linux 上 `actions/setup-python` 无 Windows 的
+  管理员权限问题，因此恢复使用它；Chromium 系统库由 root 一次性安装，runner 以普通用户运行。
+- 若服务器上同样得到 `AccessDeniedError`，说明站方拒绝自动化访问，项目到此为止，不做任何规避。
+
+## 7. 风险
 
 - 弹窗结构（`.arco-modal.confirm_order`、`.pr_name`、`a[href^="/item/"]`）未经新页面核对；
   若不符，第 8 条会以 `SuspiciousExtractionError` 失败，并由第 4.1 节的诊断输出指出具体环节。
