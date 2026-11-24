@@ -7,11 +7,12 @@ from collections.abc import Mapping
 from urllib.parse import urlsplit
 
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Locator, Page, Route
+from playwright.async_api import Locator, Page, Response, Route
 
 from gpt_stock_monitor.config import SHOP_HOST, MonitorConfig, validate_final_url
 from gpt_stock_monitor.models import Availability, Product
 from gpt_stock_monitor.sites.base import (
+    AccessDeniedError,
     CategoryNotFoundError,
     CategoryObservation,
     InteractiveChallengeError,
@@ -26,6 +27,7 @@ _CHALLENGE_TEXT = re.compile(
     r"安全验证|人机验证|验证您是真人|滑动验证|slide to verify|verify that you are a real person",
     re.IGNORECASE,
 )
+_ACCESS_DENIED_STATUSES = frozenset({401, 403, 429})
 _ProductFingerprint = tuple[tuple[str, str, str, str], ...]
 
 
@@ -114,8 +116,9 @@ class LdxpAdapter:
 
     async def _navigate(self, config: MonitorConfig) -> None:
         navigation_error: PlaywrightError | None = None
+        response: Response | None = None
         try:
-            await self._page.goto(
+            response = await self._page.goto(
                 str(config.url),
                 timeout=self._navigation_timeout_ms,
                 wait_until="domcontentloaded",
@@ -127,6 +130,14 @@ class LdxpAdapter:
         self._validate_page_url(config)
         if navigation_error is not None:
             raise SiteNavigationError("shop navigation failed") from navigation_error
+        if response is not None:
+            status = response.status
+            if status in _ACCESS_DENIED_STATUSES:
+                # A bot rule refused this client. Retrying would only hit the rule again,
+                # and the monitor never disguises itself to get past it.
+                raise AccessDeniedError(f"shop denied automated access (HTTP {status})")
+            if status >= 400:
+                raise SiteNavigationError(f"shop returned HTTP {status}")
 
         try:
             body_text = await self._page.locator("body").inner_text()

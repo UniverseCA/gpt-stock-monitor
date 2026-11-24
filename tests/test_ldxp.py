@@ -14,6 +14,7 @@ from playwright.async_api import Route, async_playwright
 from gpt_stock_monitor.config import MonitorConfig
 from gpt_stock_monitor.models import Availability
 from gpt_stock_monitor.sites.base import (
+    AccessDeniedError,
     CategoryNotFoundError,
     InteractiveChallengeError,
     SiteNavigationError,
@@ -139,6 +140,7 @@ async def _collect(
     abort_shop_navigation: bool = False,
     extra_init_script: str = "",
     close_page_after_ms: int | None = None,
+    shop_status: int = 200,
 ) -> tuple[Any, dict[str, Any]]:
     background_tasks: set[asyncio.Task[None]] = set()
     async with async_playwright() as playwright:
@@ -155,7 +157,7 @@ async def _collect(
                     await route.abort()
                 else:
                     await route.fulfill(
-                        status=200, content_type="text/html; charset=utf-8", body=html
+                        status=shop_status, content_type="text/html; charset=utf-8", body=html
                     )
             else:
                 await route.abort()
@@ -200,6 +202,7 @@ def collect(
     abort_shop_navigation: bool = False,
     extra_init_script: str = "",
     close_page_after_ms: int | None = None,
+    shop_status: int = 200,
 ) -> tuple[Any, dict[str, Any]]:
     return asyncio.run(
         _collect(
@@ -211,6 +214,7 @@ def collect(
             abort_shop_navigation=abort_shop_navigation,
             extra_init_script=extra_init_script,
             close_page_after_ms=close_page_after_ms,
+            shop_status=shop_status,
         )
     )
 
@@ -710,6 +714,39 @@ def test_esa_challenge_text_raises_without_retrying(body: str) -> None:
         collect(html, [], navigation_requests=navigation_requests)
 
     assert navigation_requests == [SHOP_URL]
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_bot_rule_denial_raises_access_denied_without_retrying(status: int) -> None:
+    navigation_requests: list[str] = []
+    # Even a denial page that happens to contain shop-like markup must not be parsed.
+    with pytest.raises(AccessDeniedError, match=f"HTTP {status}"):
+        collect(
+            shop_html([("Product", "10", "有货")]),
+            [{"href": "/item/item-1", "max": None}],
+            navigation_requests=navigation_requests,
+            shop_status=status,
+        )
+
+    assert navigation_requests == [SHOP_URL]
+
+
+def test_access_denied_is_an_interactive_challenge_for_callers() -> None:
+    assert issubclass(AccessDeniedError, InteractiveChallengeError)
+
+
+@pytest.mark.parametrize("status", [404, 500, 503])
+def test_other_http_errors_are_retried_navigation_failures(status: int) -> None:
+    navigation_requests: list[str] = []
+    with pytest.raises(SiteNavigationError, match=f"HTTP {status}"):
+        collect(
+            shop_html([]),
+            [],
+            navigation_requests=navigation_requests,
+            shop_status=status,
+        )
+
+    assert navigation_requests == [SHOP_URL, SHOP_URL, SHOP_URL]
 
 
 def test_esa_challenge_marker_raises_before_text_renders() -> None:

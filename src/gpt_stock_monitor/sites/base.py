@@ -41,6 +41,13 @@ class InteractiveChallengeError(RuntimeError):
     """The site presented an interactive challenge."""
 
 
+class AccessDeniedError(InteractiveChallengeError):
+    """The site refused this automated client outright (for example a bot rule's 403).
+
+    Like an interactive challenge, this is never retried or worked around.
+    """
+
+
 class CategoryNotFoundError(RuntimeError):
     """A configured category was not present in the page."""
 
